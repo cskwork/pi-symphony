@@ -552,12 +552,26 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 			);
 		}
 		if (webPlane) {
-			ctx.ui.notify(`Symphony web UI already running: http://127.0.0.1:${(webPlane as unknown as { port?: number }).port ?? ""}`, "info");
+			if (action === "open") {
+				const url = (webPlane as unknown as { lastUrl?: string }).lastUrl;
+				if (url) {
+					try {
+						const { exec } = await import("node:child_process");
+						const open = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+						exec(`${open} "${url}"`);
+						return void ctx.ui.notify("Symphony web UI opened in your browser.", "info");
+					} catch {
+						return void ctx.ui.notify(`Open manually: ${url}`, "info");
+					}
+				}
+			}
+			ctx.ui.notify(`Symphony web UI already running — /sym web status`, "info");
 			return;
 		}
 		try {
 			webPlane = new WebControlPlane(() => ensureCore(ctx));
 			const started = await webPlane.start();
+			(webPlane as unknown as { lastUrl?: string }).lastUrl = started.url;
 			ctx.ui.notify(
 				[
 					"Symphony UI",

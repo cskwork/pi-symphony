@@ -23,6 +23,7 @@ Then inside a repository:
 /sym             # overlay: task list + detail (Overview/Contract/Changes/Review/Checks/History)
 /sym doctor      # configuration, lease, recovery diagnostics
 /sym complete    # post-integration verification against the integrated revision
+/sym web         # local HTML control plane (loopback, token-authenticated)
 ```
 
 ## The workflow
@@ -80,9 +81,13 @@ npm run typecheck
 pi -e ./src/extension/index.ts -p "/sym doctor"   # load smoke test
 ```
 
+## Local web UI (v0.2)
+
+`/sym web` starts a loopback-only server owned by the Pi process and prints a one-time URL like `http://127.0.0.1:43127/#token=…`. The token lives in the URL fragment (never sent in an HTTP request, never logged) and is exchanged for an in-memory session credential by the SPA. Mutating routes validate host, origin, credential, content type, and body size; the SPA has no external assets and a strict CSP. `/sym web stop|status|open` control the lifecycle. The browser is a thin client: every action goes through the same `SymphonyCore` commands as the TUI, and SSE with `Last-Event-ID` replay keeps both surfaces synchronized.
+
 ## Status
 
-- **v0.1** — Pi-native foundation (this release). Single checkout, single active task, manual integration.
-- v0.2 will add the synchronized local HTML control plane over the same command/event seam.
+- **v0.2** — Pi-native foundation + synchronized local HTML control plane.
+- v0.3 adds workflow customization and composable skills.
 
 See `docs/` for version reports and review records.

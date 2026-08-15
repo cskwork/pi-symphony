@@ -28,6 +28,8 @@ import {
  */
 export class WebControlPlane {
 	private server?: Server;
+	/** Last generated URL (token fragment included) — never logged. */
+	lastUrl?: string;
 	private bridge?: EventBridge;
 	readonly token = randomBytes(24).toString("base64url");
 	private audit: Array<{ at: string; commandId?: string; type: string; result: string; detail?: string }> = [];
@@ -57,7 +59,9 @@ export class WebControlPlane {
 		this.server = server;
 		const address = server.address();
 		const port = typeof address === "object" && address !== null ? address.port : 0;
-		return { port, host, url: `http://${host}:${port}/#token=${this.token}` };
+		const url = `http://${host}:${port}/#token=${this.token}`;
+		this.lastUrl = url;
+		return { port, host, url };
 	}
 
 	async stop(): Promise<void> {
