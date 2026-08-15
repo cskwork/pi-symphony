@@ -35,7 +35,7 @@ function seedTask(): string {
 			risks: ["migration"],
 			runState: "idle",
 		};
-		setManagedSection(parsed, "plan", renderManagedSection("plan", { section: "plan", summary: "plan body", details: { steps: ["a"] }, submittedAt: "now" }));
+		setManagedSection(parsed, "plan", renderManagedSection("plan", { section: "plan", summary: "plan body", details: { steps: ["a"] }, submittedAt: "now", origin: "model" }));
 	});
 	return path;
 }
@@ -50,7 +50,7 @@ describe("task repository", () => {
 		writeFileSync(path, withNote, "utf8");
 
 		writeTaskFileAtomic(path, (parsed) => {
-			setManagedSection(parsed, "review", renderManagedSection("review", { section: "review", summary: "looks good", details: {}, submittedAt: "later" }));
+			setManagedSection(parsed, "review", renderManagedSection("review", { section: "review", summary: "looks good", details: {}, submittedAt: "later", origin: "fresh-reviewer" }));
 		});
 
 		const after = readFileSync(path, "utf8");

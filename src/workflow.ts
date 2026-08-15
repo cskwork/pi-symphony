@@ -20,10 +20,45 @@ export const TRANSITIONS: Readonly<Record<TaskStage, readonly TaskStage[]>> = {
 	cancelled: [],
 };
 
+/**
+ * Contract for reaching a stage, independent of the edge it arrives on.
+ * Unblocking a task must never shortcut evidence: entering a stage from
+ * `blocked` demands exactly what entering it from its normal predecessor
+ * demands (G03, review blocker #1).
+ */
+export function contractFor(from: TaskStage, to: TaskStage): TransitionCheck {
+	const key = `${from}→${to}`;
+	if (TRANSITION_CONTRACTS[key]) return TRANSITION_CONTRACTS[key]!;
+	// blocked → X inherits X's canonical entry contract
+	if (from === "blocked") return TRANSITION_CONTRACTS[`blocked→${to}`] ?? TRANSITION_CONTRACTS[canonicalEdgeInto(to)] ?? {};
+	return {};
+}
+
+function canonicalEdgeInto(to: TaskStage): string {
+	switch (to) {
+		case "plan": return "backlog→plan";
+		case "build": return "plan→build";
+		case "review": return "build→review";
+		case "verify": return "review→verify";
+		case "ready": return "verify→ready";
+		case "postverify": return "ready→postverify";
+		case "done": return "postverify→done";
+		default: return `${to}→${to}`;
+	}
+}
+
+export type ReportOrigin = "fresh-reviewer" | "model" | "manual";
+
 export interface TransitionCheck {
 	/** Evidence required by the target stage gate. */
 	requiresReports?: Array<"plan" | "implementation" | "review">;
 	requiresApproval?: "plan";
+	/**
+	 * The review report must come from a provenance the engine trusts:
+	 * a fresh reviewer session or an explicit human approval. A report
+	 * submitted by the implementer session can never satisfy this.
+	 */
+	requiresReviewProvenance?: boolean;
 	/** Required checks that must be freshly passed. */
 	requiresChecks?: "verify" | "postIntegration";
 }
@@ -32,10 +67,17 @@ export const TRANSITION_CONTRACTS: Readonly<Record<string, TransitionCheck>> = {
 	"backlog→plan": {},
 	"plan→build": { requiresReports: ["plan"], requiresApproval: "plan" },
 	"build→review": { requiresReports: ["plan", "implementation"] },
-	"review→verify": { requiresReports: ["plan", "implementation", "review"] },
+	"review→verify": { requiresReports: ["plan", "implementation", "review"], requiresReviewProvenance: true },
 	"verify→ready": { requiresReports: ["implementation"], requiresChecks: "verify" },
 	"ready→postverify": {},
 	"postverify→done": { requiresChecks: "postIntegration" },
+	// Unblocking re-enters a stage and must meet that stage's entry contract.
+	"blocked→plan": {},
+	"blocked→build": { requiresReports: ["plan"], requiresApproval: "plan" },
+	"blocked→review": { requiresReports: ["plan", "implementation"] },
+	"blocked→verify": { requiresReports: ["plan", "implementation", "review"], requiresReviewProvenance: true },
+	"blocked→ready": { requiresReports: ["implementation"], requiresChecks: "verify" },
+	"blocked→cancelled": {},
 };
 
 export class WorkflowError extends Error {
@@ -54,6 +96,8 @@ export function assertTransition(from: TaskStage, to: TaskStage): void {
 
 export interface EvidenceBundle {
 	hasReport: (section: "plan" | "implementation" | "review") => boolean;
+	/** Provenance of the latest review report, when one exists. */
+	reviewProvenance?: ReportOrigin;
 	planApproved: boolean;
 	/** Latest run per required check name. */
 	checks: Map<string, CheckRunEvidence>;
@@ -76,12 +120,22 @@ export function evaluateGate(
 	} catch (err) {
 		return { ok: false, reason: (err as Error).message };
 	}
-	const contract = TRANSITION_CONTRACTS[`${from}→${to}`];
-	if (!contract) return { ok: true };
+	const contract = contractFor(from, to);
 
 	for (const section of contract.requiresReports ?? []) {
 		if (!evidence.hasReport(section)) {
 			return { ok: false, reason: `${to} requires a submitted ${section} report` };
+		}
+	}
+	if (contract.requiresReviewProvenance) {
+		const origin = evidence.reviewProvenance;
+		if (origin !== "fresh-reviewer" && origin !== "manual") {
+			return {
+				ok: false,
+				reason: origin === undefined
+					? "verify requires an independent review (fresh session or recorded human approval)"
+					: "review submitted by the implementer session cannot certify the task; an independent fresh-session review is required",
+			};
 		}
 	}
 	if (contract.requiresApproval === "plan" && needsPlanApproval(config, evidence)) {

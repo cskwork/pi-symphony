@@ -8,9 +8,11 @@ const SECRET_PATTERNS: Array<{ name: string; re: RegExp; replacement: string }> 
 	{ name: "github-token", re: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, replacement: "[REDACTED:github-token]" },
 	{ name: "openai-key", re: /\bsk-[A-Za-z0-9_-]{16,}\b/g, replacement: "[REDACTED:api-key]" },
 	{ name: "anthropic-key", re: /\bsk-ant-[A-Za-z0-9_-]{16,}\b/g, replacement: "[REDACTED:api-key]" },
+	{ name: "bearer-jwt", re: /\bBearer\s+[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9_-]{4,}){1,}/g, replacement: "Bearer [REDACTED:jwt]" },
 	{
+		// ENV-style names allow underscores/digits: AWS_SECRET_ACCESS_KEY, DB_PASSWORD2…
 		name: "key-value",
-		re: /\b(password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)\b\s*[:=]\s*("([^"\n]{4,})"|[']([^'\n]{4,})[']|(\S{4,}))/gi,
+		re: /\b([A-Za-z0-9_]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_]*)\s*[:=]\s*("([^"\n]{4,})"|[']([^'\n]{4,})[']|(\S{4,}))/gi,
 		replacement: "$1=[REDACTED]",
 	},
 	{
@@ -28,11 +30,5 @@ export function redactSecrets(text: string): string {
 	return out;
 }
 
-/** Redact every value of credentials passed as an environment mapping. */
-export function redactEnv(env: Record<string, string | undefined>): Record<string, string> {
-	const out: Record<string, string> = {};
-	for (const [k, v] of Object.entries(env)) {
-		out[k] = v === undefined ? "" : "[REDACTED]";
-	}
-	return out;
-}
+/** Redact before slicing so secrets past the cap are never partially kept. */
+

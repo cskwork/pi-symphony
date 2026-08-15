@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EventLedger, replayEvents } from "../src/events.ts";
+import { EventLedger } from "../src/events.ts";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,8 +15,9 @@ describe("event ledger", () => {
 			const events = ledger.read("DEV-001");
 			expect(events.map((e) => e.sequence)).toEqual([1, 2]);
 			expect(events[1]!.eventId > events[0]!.eventId).toBe(true);
-			const state = replayEvents(events);
-			expect(state["stage"]).toBe("plan");
+			// projection rebuild is owned by SymphonyCore; ledger shape is the contract
+			expect(events[1]!.type).toBe("task.stage_changed");
+			expect(events[1]!.data).toEqual({ from: "backlog", to: "plan" });
 
 			// a new ledger instance continues the sequence (crash simulation)
 			const reborn = new EventLedger(file);

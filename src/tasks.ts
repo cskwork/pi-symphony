@@ -1,10 +1,14 @@
 import {
+	closeSync,
 	copyFileSync,
 	existsSync,
+	fsyncSync,
+	openSync,
 	mkdirSync,
 	readFileSync,
 	renameSync,
 	writeFileSync,
+	writeSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -47,19 +51,23 @@ export class TaskConflictError extends Error {
 
 /** Parse one task markdown file. Managed markers delimit machine-owned blocks. */
 export function parseTaskFile(text: string): ParsedTask {
-	if (!text.startsWith("---\n")) throw new Error("task file must start with YAML frontmatter");
-	const end = text.indexOf("\n---\n", 4);
+	// CRLF tolerance: editors on Windows write \r\n; normalize once, up front.
+	const normalized = text.includes("\r\n") ? text.replace(/\r\n/g, "\n") : text;
+	if (!normalized.startsWith("---\n")) throw new Error("task file must start with YAML frontmatter");
+	const end = normalized.indexOf("\n---\n", 4);
 	if (end < 0) throw new Error("task file frontmatter is not terminated");
-	const fmRaw = parseYaml(text.slice(4, end)) as Record<string, unknown>;
+	const fmRaw = parseYaml(normalized.slice(4, end)) as Record<string, unknown>;
 	const frontmatter = normalizeFrontmatter(fmRaw);
-	const body = text.slice(end + 5);
+	const body = normalized.slice(end + 5);
 
 	const segments: BodySegment[] = [];
+	const seenSections = new Set<ManagedSection>();
 	let cursor = 0;
 	let humanStart = 0;
 	while (cursor < body.length) {
 		let nextStart: { section: ManagedSection; index: number } | undefined;
 		for (const section of MANAGED_SECTIONS) {
+			if (seenSections.has(section)) continue; // duplicate marker: first wins
 			const marker = body.indexOf(MANAGED_START(section), cursor);
 			if (marker >= 0 && (!nextStart || marker < nextStart.index)) nextStart = { section, index: marker };
 		}
@@ -74,6 +82,7 @@ export function parseTaskFile(text: string): ParsedTask {
 			section: nextStart.section,
 			text: body.slice(nextStart.index, endMarker + MANAGED_END(nextStart.section).length),
 		});
+		seenSections.add(nextStart.section);
 		cursor = endMarker + MANAGED_END(nextStart.section).length;
 		humanStart = cursor;
 	}
@@ -164,7 +173,9 @@ export function writeTaskFileAtomic(
 	mutate: (parsed: ParsedTask) => void,
 	options: { expectedRevision?: number; now?: Date } = {},
 ): TaskFrontmatter {
-	const existing = existsSync(path) ? readFileSync(path, "utf8") : null;
+	const raw = existsSync(path) ? readFileSync(path, "utf8") : null;
+	// An empty file is an O_EXCL id claim from the allocator: treat as new.
+	const existing = raw !== null && raw.trim().length > 0 ? raw : null;
 	const parsed = existing !== null ? parseTaskFile(existing) : null;
 	if (parsed && options.expectedRevision !== undefined && parsed.frontmatter.revision !== options.expectedRevision) {
 		throw new TaskConflictError(parsed.frontmatter.id, options.expectedRevision, parsed.frontmatter.revision);
@@ -177,8 +188,14 @@ export function writeTaskFileAtomic(
 	const next = serializeTaskFile(target);
 	const tmp = join(dirname(path), `.${basename(path)}.tmp-${monotonicId()}`);
 	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(tmp, next, "utf8");
-	// fsync directory entry via rename on POSIX; renameSync is atomic
+	// Durability: write + fsync the temp file, then atomic rename.
+	const fd = openSync(tmp, "w");
+	try {
+		writeSync(fd, next);
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
 	renameSync(tmp, path);
 	return { ...target.frontmatter };
 }
@@ -237,8 +254,9 @@ export function readTaskFile(path: string): ParsedTask {
 }
 
 /**
- * Collision-safe task ID allocation. A monotonic counter file guarantees
- * uniqueness under concurrency; existence check guards pre-existing files.
+ * Collision-safe task ID allocation under concurrency. The claim file is
+ * created with O_EXCL so two racing processes can never claim the same id;
+ * the counter is advisory only.
  */
 export class TaskIdAllocator {
 	constructor(private tasksDir: string, private prefix: string) {}
@@ -248,11 +266,25 @@ export class TaskIdAllocator {
 		for (let guard = 0; guard < 10_000; guard++) {
 			const n = this.readCounter() + 1;
 			const id = `${this.prefix}-${String(n).padStart(3, "0")}`;
-			if (!existsSync(join(this.tasksDir, taskFileName(id)))) {
-				this.writeCounter(n);
-				return id;
+			const claimPath = join(this.tasksDir, taskFileName(id));
+			let fd: number;
+			try {
+				// O_EXCL | O_CREAT: fails if another process claimed this id first
+				fd = openSync(claimPath, "wx");
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+					this.writeCounter(n); // skip the taken id
+					continue;
+				}
+				if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+					mkdirSync(this.tasksDir, { recursive: true });
+					continue;
+				}
+				throw err;
 			}
-			this.writeCounter(n); // skip an existing colliding file
+			closeSync(fd);
+			this.writeCounter(n);
+			return id;
 		}
 		throw new Error("unable to allocate a task id");
 	}

@@ -26,11 +26,22 @@ export class LeaseManager {
 		}
 	}
 
-	acquire(record: LeaseRecord): void {
+	/**
+	 * Mutual exclusion: refuses to overwrite a lease held by another live
+	 * owner. Returns false when the checkout is already leased; the caller
+	 * must release or reclaim first.
+	 */
+	acquire(record: LeaseRecord): boolean {
+		const current = this.read();
+		if (current) {
+			const sameOwner = current.pid === record.pid && current.sessionId === record.sessionId;
+			if (!sameOwner && isProcessAlive(current.pid)) return false;
+		}
 		mkdirSync(dirname(this.leaseFile), { recursive: true });
 		const tmp = `${this.leaseFile}.tmp`;
 		writeFileSync(tmp, JSON.stringify(record, null, "\t"), "utf8");
 		renameSync(tmp, this.leaseFile);
+		return true;
 	}
 
 	release(): boolean {
@@ -45,10 +56,16 @@ export class LeaseManager {
 		return true;
 	}
 
-	/** Stale = file exists but owner process is dead (or record unreadable). */
+	/**
+	 * Stale = file exists but the owner process is dead or the record is
+	 * unreadable (torn write). An unreadable lease is always reclaimable.
+	 */
 	status(): { held: boolean; stale: boolean; record?: LeaseRecord } {
 		const record = this.read();
-		if (!record) return { held: false, stale: false };
+		if (!record) {
+			const exists = existsSync(this.leaseFile);
+			return exists ? { held: false, stale: true } : { held: false, stale: false };
+		}
 		const alive = isProcessAlive(record.pid);
 		return { held: alive, stale: !alive, record };
 	}

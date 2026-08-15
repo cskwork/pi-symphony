@@ -59,6 +59,8 @@ export class SymphonyOverlay {
 	constructor(
 		private model: OverlayModel,
 		private onAction: (action: OverlayAction) => void,
+		/** Terminal height bound; the overlay never renders more lines. */
+		private maxHeight = 24,
 	) {}
 
 	handleInput(data: string): void {
@@ -138,19 +140,23 @@ export class SymphonyOverlay {
 		const listWidth = wide ? Math.floor(inner / 2) : inner;
 		const detailWidth = wide ? inner - listWidth : inner;
 
-		const listLines = this.renderList(listWidth);
+		// Reserve chrome lines (header 3 + footer 3) and clamp body rows so the
+		// overlay always fits the terminal height (V01-UI-001: usable at 80×24).
+		const chrome = 6;
+		const bodyBudget = Math.max(3, this.maxHeight - chrome);
+		const listLines = this.renderList(listWidth, bodyBudget);
 		if (wide) {
-			const detailLines = this.renderDetail(detailWidth);
-			const rows = Math.max(listLines.length, detailLines.length, 4);
+			const detailLines = this.renderDetail(detailWidth, bodyBudget);
+			const rows = Math.min(bodyBudget, Math.max(listLines.length, detailLines.length, 4));
 			for (let i = 0; i < rows; i++) {
 				const left = listLines[i] ?? "".padEnd(listWidth);
 				const right = detailLines[i] ?? "";
 				lines.push(`│${fit(left, listWidth)}${fit(right, detailWidth)}│`);
 			}
 		} else if (this.focus === "list") {
-			for (const line of listLines) lines.push(`│${fit(line, inner)}│`);
+			for (const line of listLines.slice(0, bodyBudget)) lines.push(`│${fit(line, inner)}│`);
 		} else {
-			for (const line of this.renderDetail(inner)) lines.push(`│${fit(line, inner)}│`);
+			for (const line of this.renderDetail(inner, bodyBudget)) lines.push(`│${fit(line, inner)}│`);
 		}
 		const footer = this.focus === "list"
 			? "↑/↓ select · enter detail · tab pane · esc close"
@@ -158,12 +164,16 @@ export class SymphonyOverlay {
 		lines.push(`├${border}┤`);
 		lines.push(`│${pad(footer, inner)}│`);
 		lines.push(`└${border}┘`);
-		return lines;
+		return lines.slice(0, this.maxHeight);
 	}
 
-	private renderList(width: number): string[] {
+	private renderList(width: number, maxRows: number): string[] {
 		const lines: string[] = [];
-		for (let i = 0; i < this.model.tasks.length; i++) {
+		const visible = Math.min(this.model.tasks.length, Math.max(1, maxRows - 1));
+		// Keep the selected row inside the visible window (scrolling list).
+		if (this.selected < 0) this.selected = 0;
+		const start = Math.max(0, Math.min(this.selected - visible + 1, this.model.tasks.length - visible));
+		for (let i = start; i < start + visible && i < this.model.tasks.length; i++) {
 			const task = this.model.tasks[i]!;
 			const icon = STAGE_ICON[task.stage] ?? "?";
 			const run = RUN_ICON[task.runState] ?? " ";
@@ -171,10 +181,13 @@ export class SymphonyOverlay {
 			const text = `${marker}${icon} ${task.id} ${task.stage} ${run} ${task.title}`;
 			lines.push(truncateToWidth(text, width));
 		}
+		if (this.model.tasks.length > visible) {
+			lines.push(truncateToWidth(`  … ${this.model.tasks.length - visible} more task(s) — ↑/↓ to scroll`, width));
+		}
 		return lines;
 	}
 
-	private renderDetail(width: number): string[] {
+	private renderDetail(width: number, maxRows: number): string[] {
 		const task = this.model.tasks[this.selected];
 		const lines: string[] = [];
 		const tabs = Object.keys(this.model.detail) as DetailTab[];
@@ -184,15 +197,21 @@ export class SymphonyOverlay {
 			lines.push("(no task selected)");
 			return lines;
 		}
-		for (const line of this.model.detail[this.tab] ?? []) {
+		const actionLines = this.model.actions.map((action, i) =>
+			truncateToWidth(`${i === this.actionIndex ? "›" : " "} ${action.label}`, width),
+		);
+		// Reserve rows for actions so they are always reachable within budget.
+		const reserved = actionLines.length + 3;
+		const detailBudget = Math.max(0, maxRows - reserved - lines.length);
+		for (const line of (this.model.detail[this.tab] ?? []).slice(0, detailBudget)) {
 			lines.push(truncateToWidth(line, width));
+		}
+		if ((this.model.detail[this.tab] ?? []).length > detailBudget) {
+			lines.push(truncateToWidth(`… ${(this.model.detail[this.tab] ?? []).length - detailBudget} more line(s) — ←/→ tabs`, width));
 		}
 		lines.push("─".repeat(Math.max(1, width - 1)));
 		lines.push("Actions:");
-		this.model.actions.forEach((action, i) => {
-			const marker = i === this.actionIndex ? "›" : " ";
-			lines.push(truncateToWidth(`${marker} ${action.label}`, width));
-		});
+		lines.push(...actionLines);
 		return lines;
 	}
 

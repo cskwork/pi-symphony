@@ -92,8 +92,8 @@ export function registerSymphonyTools(
 			});
 			return result.ok
 				? {
-						content: [{ type: "text", text: `Plan recorded. Task ${id} is now ${result.value!.stageAfter}.${result.next ? " " + result.next : ""}` }],
-						details: { taskId: id, stage: result.value!.stageAfter },
+						content: [{ type: "text", text: `Plan recorded. Task ${id} is now ${result.value.stageAfter}.${result.next ? " " + result.next : ""}` }],
+						details: { taskId: id, stage: result.value.stageAfter },
 					}
 				: err(result.error!);
 		},
@@ -132,8 +132,8 @@ export function registerSymphonyTools(
 			});
 			return result.ok
 				? {
-						content: [{ type: "text", text: `Build report recorded. Task ${id} is now ${result.value!.stageAfter}. Next: /sym continue starts the independent review.` }],
-						details: { taskId: id, stage: result.value!.stageAfter },
+						content: [{ type: "text", text: `Build report recorded. Task ${id} is now ${result.value.stageAfter}. Next: /sym continue starts the independent review.` }],
+						details: { taskId: id, stage: result.value.stageAfter },
 					}
 				: err(result.error!);
 		},
@@ -141,8 +141,9 @@ export function registerSymphonyTools(
 
 	pi.registerTool({
 		name: "sym_review_submit",
-		label: "Submit review",
-		description: "Submit a structured review report (used by reviewer sessions and manual reviews).",
+		label: "Record review notes",
+		description:
+			"Record review notes from this (implementer) session. IMPORTANT: notes submitted here are marked with implementer provenance and can NEVER satisfy the review→verify gate — Symphony runs an independent fresh-session review for that. Use this only to attach observations.",
 		parameters: Type.Object({
 			taskId: Type.String(),
 			verdict: StringEnum(["approved", "changes_requested"]),
@@ -163,10 +164,14 @@ export function registerSymphonyTools(
 				section: "review" as ManagedSection,
 				summary: `${params.verdict.toUpperCase()} — ${params.summary}`,
 				details: { verdict: params.verdict, findings: params.findings },
+				origin: "model",
 			});
 			return result.ok
-				? { content: [{ type: "text", text: `Review recorded (${params.verdict}). Task is ${result.value!.stageAfter}.` }], details: { taskId: params.taskId } }
-				: err(result.error!);
+				? {
+						content: [{ type: "text", text: `Notes recorded with implementer provenance. Task stays ${result.value.stageAfter}: an independent fresh-session review (run /sym continue in review) is required to advance to verify.` }],
+						details: { taskId: params.taskId, provenance: "model" },
+					}
+				: err(result.error);
 		},
 	});
 }

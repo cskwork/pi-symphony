@@ -42,7 +42,7 @@ async function driveToStage(c: SymphonyCore, stage: string, taskId: string): Pro
 	const toReview = c.transition(taskId, "review");
 	if (!toReview.ok) throw new Error(toReview.error);
 	if (stage === "review") return;
-	c.submitReport({ taskId, section: "review", summary: "APPROVED — fine", details: { verdict: "approved" } });
+	c.submitReport({ taskId, section: "review", summary: "APPROVED — fine", details: { verdict: "approved" }, origin: "fresh-reviewer" });
 	const toVerify = c.transition(taskId, "verify");
 	if (!toVerify.ok) throw new Error(toVerify.error);
 }
@@ -155,13 +155,9 @@ describe("SymphonyCore lifecycle (E2E)", () => {
 
 	it("V01-REC-001: restart marks running attempts Interrupted without duplicating", async () => {
 		const taskId = mustCreate(core, "t");
-		core.transition(taskId, "plan");
-		const attempt = core.startAttempt(taskId, "plan");
-		if (!attempt.ok) throw new Error(attempt.error);
-
-		// simulate a different process dying: lease held by dead pid
+		// A process that will die holds the lease and the in-flight attempt.
 		const deadPid = findDeadPid();
-		const crashedCore = new SymphonyCore({
+		const dyingCore = new SymphonyCore({
 			repoRoot: dir,
 			ui: silentUi,
 			gitExec: realGitExec(dir),
@@ -169,15 +165,27 @@ describe("SymphonyCore lifecycle (E2E)", () => {
 			sessionId: "sess-crashed",
 			env: { PATH: process.env.PATH ?? "" },
 		});
-		crashedCore.getTask(taskId);
-		// crashedCore's attempt bookkeeping replays from ledger: attempt.plan-1 was running
-		const recovery = crashedCore.recover();
-		expect(recovery.ok && recovery.value.interrupted).toContain("plan-1");
+		dyingCore.transition(taskId, "plan");
+		const attempt = dyingCore.startAttempt(taskId, "plan");
+		if (!attempt.ok) throw new Error(attempt.error);
 
-		// the task's run state is interrupted; starting the same stage again creates plan-2 not a duplicate plan-1 resurrection
-		const task = crashedCore.getTask(taskId);
+		// A restart in a new process recovers: dead-owner lease is stale,
+		// the in-flight attempt becomes Interrupted, never duplicated.
+		const reborn = newCore();
+		const recovery = reborn.recover();
+		expect(recovery.ok).toBe(true);
+		if (recovery.ok) {
+			expect(recovery.value.interrupted).toContain("plan-1");
+			expect(recovery.value.reclaimedLease).toBe(true);
+		}
+		const task = reborn.getTask(taskId);
 		expect(task.ok ? task.value.frontmatter.runState : "unknown").toBe("interrupted");
-		const second = crashedCore.startAttempt(taskId, "plan");
+		// resume keeps the same attempt; retry creates plan-2
+		const resumed = reborn.resumeAttempt(taskId, "plan-1");
+		expect(resumed.ok).toBe(true);
+		if (resumed.ok) expect(resumed.value.attemptId).toBe("plan-1");
+		reborn.interruptAttempt(taskId, "plan-1");
+		const second = reborn.startAttempt(taskId, "plan");
 		expect(second.ok).toBe(true);
 		if (second.ok) expect(second.value.attemptId).toBe("plan-2");
 	});

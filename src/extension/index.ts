@@ -17,7 +17,8 @@ import type { Stage } from "../types.ts";
 import { registerSymphonyTools } from "./tools.ts";
 import { SymphonyOverlay, type OverlayAction, type OverlayModel } from "./overlay.ts";
 import { buildBrief, configIssuesText, doctorLines, nextStepLine, planBrief, taskDetailPanes } from "./presentation.ts";
-import { classifyWrite, findDestructiveCommand, pathRelativeTo, resolveToolPath } from "./guard.ts";
+import { classifyWrite, escapesCwd, findDestructiveCommand, pathRelativeTo, realpathOrSelf, redirectTargets, resolveToolPath } from "./guard.ts";
+import { WebControlPlane } from "../web/server.ts";
 
 const SUBCOMMANDS = [
 	"init",
@@ -32,12 +33,14 @@ const SUBCOMMANDS = [
 	"resume",
 	"retry",
 	"cancel",
+	"web",
 ] as const;
 
 export default function symphonyExtension(pi: ExtensionAPI): void {
 	let core: SymphonyCore | undefined;
 	let coreCwd: string | undefined;
 	let sessionId = "unknown";
+	let webPlane: WebControlPlane | undefined;
 
 	function gitExecFactory(ctx: ExtensionContext) {
 		return async (argv: string[], options?: { cwd?: string; timeoutMs?: number }) => {
@@ -98,6 +101,8 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		await webPlane?.stop();
+		webPlane = undefined;
 		core?.shutdown();
 		core = undefined;
 		coreCwd = undefined;
@@ -113,35 +118,50 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 			protectedPaths: core.config.security.protectedPaths,
 			policy: core.config.security.protectedPathPolicy ?? "confirm",
 		};
+		const decidePath = async (rawPath: string, tool: string) => {
+			// Resolve through symlinks and re-derive the relative path so
+			// aliases and ../ traversals land on the same classification.
+			const absolute = resolveToolPath(ctx.cwd, rawPath);
+			const real = realpathOrSelf(absolute);
+			const rel = pathRelativeTo(ctx.cwd, real);
+			const escaped = escapesCwd(ctx.cwd, real);
+			const decision = classifyWrite(rel, policy);
+			if (decision === "block" || (escaped && classifyWrite(absolute, policy) !== "allow")) {
+				return { block: true, reason: `Symphony: "${rel}" is protected workflow state (tasks/evidence/config/git); model writes are not allowed` };
+			}
+			if (decision === "confirm") {
+				const ok = await ctx.ui.confirm(
+					"Symphony protected path",
+					`Allow ${tool} to modify protected path "${rel}" in ${ctx.cwd}?`,
+				);
+				if (!ok) return { block: true, reason: `User declined protected-path write to ${rel}` };
+			}
+			return undefined;
+		};
 		if (event.toolName === "write" || event.toolName === "edit") {
 			const input = event.input as { path?: string };
 			if (typeof input.path === "string") {
-				const absolute = resolveToolPath(ctx.cwd, input.path);
-				const rel = pathRelativeTo(ctx.cwd, absolute);
-				const decision = classifyWrite(rel, policy);
-				if (decision === "block") {
-					return { block: true, reason: `Symphony: "${rel}" is a protected path (policy: block)` };
-				}
-				if (decision === "confirm") {
-					const ok = await ctx.ui.confirm(
-						"Symphony protected path",
-						`Allow ${event.toolName} to modify protected path "${rel}" in ${ctx.cwd}?`,
-					);
-					if (!ok) return { block: true, reason: `User declined protected-path write to ${rel}` };
-				}
+				const decision = await decidePath(input.path, event.toolName);
+				if (decision) return decision;
 			}
 			return;
 		}
 		if (event.toolName === "bash") {
 			const input = event.input as { command?: string };
 			if (typeof input.command === "string") {
-				const label = findDestructiveCommand(input.command);
+				const command = input.command;
+				const label = findDestructiveCommand(command);
 				if (label) {
 					const ok = await ctx.ui.confirm(
 						"Symphony: destructive command",
 						`Allow "${label}" in ${ctx.cwd}? This extension is not a sandbox; it runs with your permissions.`,
 					);
 					if (!ok) return { block: true, reason: `User declined ${label}` };
+				}
+				// Redirect/tee/dd targets aimed at protected state are blocked.
+				for (const target of redirectTargets(command)) {
+					const decision = await decidePath(target, "bash redirect");
+					if (decision) return decision;
 				}
 			}
 		}
@@ -189,6 +209,8 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 						return await cmdResume(ctx, c, sub);
 					case "cancel":
 						return await cmdCancel(ctx, c);
+					case "web":
+						return await cmdWeb(ctx, c, rest[0]);
 					default:
 						ctx.ui.notify(`Symphony: unknown subcommand "${sub}". Try /sym for the overlay.`, "warning");
 				}
@@ -283,13 +305,25 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 
 		// Interrupted recovery path (V01-REC-001): explicit choice, no auto-resume.
 		if (task.runState === "interrupted") {
-			const choice = await ctx.ui.select(`Task ${task.id} was interrupted during ${task.stage}.`, ["Resume stage", "Retry stage", "Inspect task", "Cancel task"]);
+			const choice = await ctx.ui.select(`Task ${task.id} was interrupted during ${task.stage}.`, ["Resume stage (continue same attempt)", "Retry stage (new attempt)", "Inspect task", "Cancel task"]);
 			if (!choice) return;
 			if (choice === "Inspect task") return cmdStatus(ctx, c, task.id);
 			if (choice === "Cancel task") return cmdCancel(ctx, c, task.id);
-			c.setRunState(task.id, choice === "Retry stage" ? "idle" : "waiting");
-			if (choice === "Retry stage") {
-				// fall through to stage dispatch with a fresh attempt
+			if (choice.startsWith("Resume stage")) {
+				// Resume continues the interrupted attempt — no retry budget spent.
+				const latest = latestAttempt(c, task.id);
+				if (latest) {
+					const resumed = c.resumeAttempt(task.id, latest);
+					if (resumed.ok) {
+						ctx.ui.notify(`Attempt ${latest} resumed for ${task.id}.`, "info");
+						return; // stage dispatch happens on the next continue
+					}
+					return ctx.ui.notify(`Resume failed: ${resumed.error}`, "warning");
+				}
+				c.setRunState(task.id, "idle");
+			} else {
+				c.setRunState(task.id, "idle");
+				// Retry falls through to stage dispatch with a fresh attempt
 			}
 		}
 
@@ -388,7 +422,14 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 		const attempt = c.startAttempt(taskId, "review" as Stage);
 		if (!attempt.ok) return ctx.ui.notify(attempt.error, "warning");
 		ctx.ui.notify(`Symphony: starting fresh reviewer session for ${taskId} (no implementer transcript)…`, "info");
-		const runner = new SdkReviewerRunner();
+		const reviewerRole = c.config.roles.reviewer;
+		const runner = new SdkReviewerRunner({
+			model: reviewerRole.model,
+			thinking: reviewerRole.thinking,
+			maxTurns: reviewerRole.maxTurns,
+			tools: reviewerRole.tools?.length ? reviewerRole.tools : ["read", "grep", "find", "ls"],
+			repoRoot: ctx.cwd,
+		});
 		try {
 			const report = await runner.run(manifestResult.ok ? manifestResult.value.manifest : "", { taskId });
 			const persist = persistReviewReport(c, taskId, report);
@@ -409,6 +450,12 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 			if (attempt.ok) c.interruptAttempt(taskId, attempt.value.attemptId);
 			ctx.ui.notify(`Reviewer failed: ${(err as Error).message}. Attempt marked interrupted — /sym continue offers retry.`, "error");
 		}
+	}
+
+	function latestAttempt(c: SymphonyCore, taskId: string): string | undefined {
+		const events = c.ledger.read(taskId);
+		const started = events.filter((e) => e.type === "attempt.started" && e.attemptId);
+		return started[started.length - 1]?.attemptId;
 	}
 
 	function cmdStatus(ctx: ExtensionContext, c: SymphonyCore, taskId?: string): void {
@@ -487,6 +534,45 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 		await cmdContinue(ctx, c);
 	}
 
+	async function cmdWeb(ctx: ExtensionContext, c: SymphonyCore, action?: string): Promise<void> {
+		if (action === "stop") {
+			if (webPlane) {
+				await webPlane.stop();
+				webPlane = undefined;
+				ctx.ui.notify("Symphony web UI stopped.", "info");
+			} else {
+				ctx.ui.notify("Symphony web UI is not running.", "info");
+			}
+			return;
+		}
+		if (action === "status") {
+			return void ctx.ui.notify(
+				webPlane ? "Symphony web UI: running (loopback)" : "Symphony web UI: stopped",
+				"info",
+			);
+		}
+		if (webPlane) {
+			ctx.ui.notify(`Symphony web UI already running: http://127.0.0.1:${(webPlane as unknown as { port?: number }).port ?? ""}`, "info");
+			return;
+		}
+		try {
+			webPlane = new WebControlPlane(() => ensureCore(ctx));
+			const started = await webPlane.start();
+			ctx.ui.notify(
+				[
+					"Symphony UI",
+					started.url,
+					`Repository: ${ctx.cwd}`,
+					"Remote access: disabled (loopback only; not a sandbox boundary)",
+				].join("\n"),
+				"info",
+			);
+		} catch (err) {
+			webPlane = undefined;
+			ctx.ui.notify(`Failed to start web UI: ${(err as Error).message}`, "error");
+		}
+	}
+
 	function cmdCancel(ctx: ExtensionContext, c: SymphonyCore, taskId?: string): void {
 		const id = taskId ?? c.listTasks().find((t) => !["done", "cancelled"].includes(t.stage))?.id;
 		if (!id) return void ctx.ui.notify("No active task.", "info");
@@ -562,6 +648,7 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 	}
 
 	async function openOverlay(pi: ExtensionAPI, ctx: ExtensionContext, c: SymphonyCore): Promise<void> {
+		let selectedId: string | undefined;
 		const model = buildModel(c);
 		if (ctx.mode !== "tui") {
 			const lines = model.tasks.map((t) => `${t.id} ${t.stage} ${t.runState} — ${t.title}`);
@@ -573,16 +660,19 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 			render: (width: number) => overlay.render(width),
 			handleInput: (data: string) => {
 				overlay.handleInput(data);
+				selectedId = overlay.selectedTaskId;
 				tui.requestRender();
 				if (overlay.isClosed) done(overlay.closeResult);
 			},
 			invalidate: () => overlay.invalidate(),
 		}), { overlay: true });
-		if (choice) await runOverlayAction(choice, ctx, c);
+		if (choice) await runOverlayAction(choice, ctx, c, selectedId);
 	}
 
-	async function runOverlayAction(actionId: string, ctx: ExtensionContext, c: SymphonyCore): Promise<void> {
-		const task = c.listTasks().find((t) => !["done", "cancelled"].includes(t.stage));
+	async function runOverlayAction(actionId: string, ctx: ExtensionContext, c: SymphonyCore, selectedId?: string): Promise<void> {
+		const all = c.listTasks();
+		const task = (selectedId ? all.find((t) => t.id === selectedId) : undefined)
+			?? all.find((t) => !["done", "cancelled"].includes(t.stage));
 		switch (actionId) {
 			case "new":
 				return cmdNew(ctx, c);
@@ -622,6 +712,7 @@ function persistReviewReport(c: SymphonyCore, taskId: string, report: import("..
 		section: "review",
 		summary: `${report.verdict.toUpperCase()} — ${report.summary}`,
 		details: { verdict: report.verdict, findings: report.findings, sessionId: report.sessionId },
+		origin: "fresh-reviewer",
 	});
 	return result.ok ? { ok: true } : { ok: false, error: result.error };
 }

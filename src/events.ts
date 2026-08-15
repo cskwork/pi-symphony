@@ -14,32 +14,32 @@ export class EventLedger {
 	constructor(private eventsFile: (taskId: string) => string) {}
 
 	append(
-		taskId: string,
+		aggregate: string,
 		type: string,
 		data: Record<string, unknown>,
 		options: { aggregateRevision: number; attemptId?: string; now?: Date },
 	): SymphonyEvent {
-		const file = this.eventsFile(taskId);
+		const file = this.aggregateFile(aggregate);
 		mkdirSync(dirname(file), { recursive: true });
 		this.truncateTornTail(file);
-		const sequence = (this.sequences.get(taskId) ?? this.readLastSequence(taskId)) + 1;
+		const sequence = (this.sequences.get(aggregate) ?? this.readLastSequence(aggregate)) + 1;
 		const event: SymphonyEvent = {
 			eventId: monotonicId(),
 			sequence,
 			type,
-			aggregateId: taskId,
+			aggregateId: aggregate,
 			aggregateRevision: options.aggregateRevision,
 			attemptId: options.attemptId,
 			emittedAt: (options.now ?? new Date()).toISOString(),
 			data,
 		};
 		appendFileSync(file, JSON.stringify(event) + "\n", "utf8");
-		this.sequences.set(taskId, sequence);
+		this.sequences.set(aggregate, sequence);
 		return event;
 	}
 
-	read(taskId: string): SymphonyEvent[] {
-		const file = this.eventsFile(taskId);
+	read(aggregate: string): SymphonyEvent[] {
+		const file = this.aggregateFile(aggregate);
 		if (!existsSync(file)) return [];
 		const lines = readFileSync(file, "utf8").split("\n");
 		const events: SymphonyEvent[] = [];
@@ -55,7 +55,7 @@ export class EventLedger {
 				break;
 			}
 		}
-		this.sequences.set(taskId, events.length > 0 ? (events[events.length - 1]!.sequence) : 0);
+		this.sequences.set(aggregate, events.length > 0 ? (events[events.length - 1]!.sequence) : 0);
 		return events;
 	}
 
@@ -84,50 +84,22 @@ export class EventLedger {
 		}
 	}
 
-	private readLastSequence(taskId: string): number {
-		const events = this.read(taskId);
+	/** Task aggregates must be valid ids; system aggregates use a fixed file. */
+	private aggregateFile(aggregate: string): string {
+		if (aggregate === "runtime" || aggregate === "config") return this.systemFile;
+		return this.eventsFile(aggregate);
+	}
+
+	private get systemFile(): string {
+		// Derive the events directory without validating a fake task id.
+		const probe = this.eventsFile("DEV-000");
+		return probe.replace("DEV-000.jsonl", "_system.jsonl");
+	}
+
+	private readLastSequence(aggregate: string): number {
+		const events = this.read(aggregate);
 		return events.length > 0 ? events[events.length - 1]!.sequence : 0;
 	}
 }
 
-/** Rebuild the current projection of an aggregate from its event stream. */
-export function replayEvents(events: SymphonyEvent[]): Record<string, unknown> {
-	const state: Record<string, unknown> = {};
-	for (const event of events) {
-		applyEvent(state, event);
-	}
-	return state;
-}
-
-function applyEvent(state: Record<string, unknown>, event: SymphonyEvent): void {
-	switch (event.type) {
-		case "task.created":
-			state["id"] = event.aggregateId;
-			state["title"] = event.data["title"];
-			state["stage"] = event.data["stage"];
-			state["revision"] = event.aggregateRevision;
-			break;
-		case "task.stage_changed":
-			state["stage"] = event.data["to"];
-			state["revision"] = event.aggregateRevision;
-			break;
-		case "task.run_state_changed":
-			state["runState"] = event.data["to"];
-			state["revision"] = event.aggregateRevision;
-			break;
-		case "task.updated":
-			state["revision"] = event.aggregateRevision;
-			for (const [k, v] of Object.entries(event.data)) state[k] = v;
-			break;
-		case "attempt.started":
-			state["attempt"] = { id: event.attemptId, status: "running", stage: event.data["stage"] };
-			break;
-		case "attempt.completed":
-		case "attempt.interrupted":
-			if (state["attempt"]) (state["attempt"] as Record<string, unknown>)["status"] = event.data["status"];
-			break;
-		default:
-			break;
-	}
-	state[`lastEvent:${event.type}`] = event.eventId;
-}
+/** Projection rebuild lives in SymphonyCore.replay (single owner). */

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { monotonicId } from "./ids.ts";
 import { redactSecrets } from "./redact.ts";
@@ -11,33 +12,54 @@ export type CommandExecutor = (
 	options: { cwd: string; timeoutMs: number; env: Record<string, string> },
 ) => Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string }>;
 
+const MAX_BUFFERED_BYTES = 5 * 1024 * 1024;
+
 export const nodeExecutor: CommandExecutor = (argv, options) =>
 	new Promise((resolve) => {
 		let stdout = "";
 		let stderr = "";
+		let dropped = 0;
 		let timedOut = false;
 		let settled = false;
+		// detached → own process group, so the timeout kill reaps the whole
+		// tree (npm/vitest spawn children that otherwise hold the pipes open).
 		const child = spawn(argv[0]!, argv.slice(1), {
 			cwd: options.cwd,
 			env: options.env,
 			stdio: ["ignore", "pipe", "pipe"],
 			shell: false, // never shell:true (PRD security model)
+			detached: true,
 		});
+		const killTree = () => {
+			try {
+				if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+			} catch {
+				child.kill("SIGKILL");
+			}
+		};
 		const timer = setTimeout(() => {
 			timedOut = true;
-			child.kill("SIGKILL");
+			killTree();
 		}, options.timeoutMs);
+		const append = (buffer: string, chunk: Buffer): string => {
+			if (buffer.length >= MAX_BUFFERED_BYTES) {
+				dropped += chunk.length;
+				return buffer;
+			}
+			return buffer + chunk.toString("utf8");
+		};
 		child.stdout.on("data", (chunk: Buffer) => {
-			stdout += chunk.toString("utf8");
+			stdout = append(stdout, chunk);
 		});
 		child.stderr.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString("utf8");
+			stderr = append(stderr, chunk);
 		});
 		const finish = (code: number | null, error?: string) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
-			resolve({ code, stdout, stderr, timedOut, error });
+			const note = dropped > 0 ? `\n[output buffer capped: ${dropped} bytes dropped]` : "";
+			resolve({ code, stdout: stdout + note, stderr, timedOut, error });
 		};
 		child.on("error", (err) => finish(null, err.message));
 		child.on("close", (code) => finish(code));
@@ -80,10 +102,11 @@ export async function runCheck(
 		result = { code: null, stdout: "", stderr: "", timedOut: false, error: (err as Error).message };
 	}
 	const finishedAt = new Date();
-	const combined = (result.stdout + (result.stderr ? `\n[stderr]\n${result.stderr}` : "")).slice(0, maxBytes * 2);
-	const redacted = redactSecrets(combined);
-	const truncated = redacted.length > maxBytes;
-	const output = truncated ? `${redacted.slice(0, maxBytes)}\n[truncated at ${maxBytes} bytes]` : redacted;
+	// Redact BEFORE slicing so secrets past the cap are never partially kept.
+	const redacted = redactSecrets(result.stdout + (result.stderr ? `\n[stderr]\n${result.stderr}` : ""));
+	const combined = redacted.slice(0, maxBytes * 2);
+	const truncated = combined.length > maxBytes;
+	const output = truncated ? `${combined.slice(0, maxBytes)}\n[truncated at ${maxBytes} bytes]` : combined;
 
 	let status: CheckStatus;
 	if (result.error && result.code === null && !result.timedOut) status = "unavailable";
@@ -107,17 +130,32 @@ export async function runCheck(
 	return { status, evidence };
 }
 
-/** Persist a check evidence artifact atomically. */
+/**
+ * Persist a check evidence artifact atomically; returns (path, digest).
+ * The digest is recorded in the event ledger so post-hoc tampering with the
+ * artifact is detectable on rehydration.
+ */
 export function persistCheckEvidence(
 	checksDir: string,
 	evidence: CheckRunEvidence,
-): string {
+): { path: string; digest: string } {
 	mkdirSync(checksDir, { recursive: true });
 	const path = join(checksDir, `${evidence.check}-${evidence.runId}.json`);
+	const body = JSON.stringify(evidence, null, "\t") + "\n";
 	const tmp = `${path}.tmp`;
-	writeFileSync(tmp, JSON.stringify(evidence, null, "\t") + "\n", "utf8");
+	writeFileSync(tmp, body, "utf8");
 	renameSync(tmp, path);
-	return path;
+	return { path, digest: createHash("sha256").update(body).digest("hex").slice(0, 32) };
+}
+
+/** Verify an artifact still matches the digest recorded when it was written. */
+export function verifyCheckEvidenceDigest(checksDir: string, evidence: CheckRunEvidence, digest: string): boolean {
+	try {
+		const body = readFileSync(join(checksDir, `${evidence.check}-${evidence.runId}.json`), "utf8");
+		return createHash("sha256").update(body).digest("hex").slice(0, 32) === digest;
+	} catch {
+		return false;
+	}
 }
 
 /** Build the allowlisted environment for a check (PATH plus explicit entries). */
@@ -133,9 +171,7 @@ export function buildCheckEnv(def: CommandDefinition, baseEnv: NodeJS.ProcessEnv
 }
 
 /** Mark evidence stale when it ran against a different revision. */
-export function isStale(evidence: CheckRunEvidence, currentRevision: string | null): boolean {
-	// Non-git repositories (or artifacts recorded without a revision) have no
-	// freshness anchor: staleness is untracked rather than assumed.
+export function isStale(evidence: { revision: string | null }, currentRevision: string | null): boolean {
 	if (currentRevision === null || evidence.revision === null) return false;
 	return evidence.revision !== currentRevision;
 }

@@ -38,7 +38,7 @@ export type AttemptStatus =
 	| "interrupted"
 	| "cancelled";
 
-export type CheckStatus = "passed" | "failed" | "timeout" | "unavailable" | "stale";
+export type CheckStatus = "passed" | "failed" | "timeout" | "unavailable" | "stale" | "broken";
 
 export interface AcceptanceCriterion {
 	text: string;
@@ -95,6 +95,11 @@ export interface StageReport {
 	/** Structured details (validated per section). */
 	details: Record<string, unknown>;
 	submittedAt: string;
+	/**
+	 * Who produced the report. The workflow engine refuses review→verify
+	 * unless the review report is `fresh-reviewer` or `manual`.
+	 */
+	origin: "fresh-reviewer" | "model" | "manual";
 }
 
 export interface ApprovalRecord {
@@ -103,6 +108,8 @@ export interface ApprovalRecord {
 	taskId: string;
 	actor: string;
 	inputRevision: number;
+	/** Aggregate revision of the plan this approval reviewed. */
+	planRevision?: number;
 	configHash: string;
 	approvedAt: string;
 }

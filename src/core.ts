@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { monotonicId } from "./ids.ts";
+import { isValidTaskId, monotonicId } from "./ids.ts";
 import { configHash, loadConfigFile, type SymphonyConfig } from "./config.ts";
 import { EventLedger } from "./events.ts";
 import { LeaseManager } from "./lease.ts";
@@ -19,12 +19,13 @@ import {
 } from "./tasks.ts";
 import {
 	assertTransition,
+	contractFor,
 	evaluateGate,
 	nextAction,
 	needsPlanApproval,
 	type EvidenceBundle,
 } from "./workflow.ts";
-import { buildCheckEnv, persistCheckEvidence, runCheck, type CommandExecutor } from "./checks.ts";
+import { buildCheckEnv, persistCheckEvidence, runCheck, verifyCheckEvidenceDigest, type CommandExecutor } from "./checks.ts";
 import {
 	assertReadOnlyGit,
 	boundedDiff,
@@ -85,9 +86,10 @@ export class SymphonyCore {
 	private readonly lease: LeaseManager;
 	config: SymphonyConfig;
 	configIssues: ReturnType<typeof loadConfigFile>["issues"];
-	private attempts = new Map<string, AttemptRecord>();
+	private attempts = new Map<string, AttemptRecord>(); // key: `${taskId}#${attemptId}`
 	private approvals = new Map<string, ApprovalRecord>();
-	private reports = new Map<string, Set<ManagedSection>>(); // taskId → submitted sections
+	private reports = new Map<string, Map<ManagedSection, StageReport>>(); // taskId → section → latest report
+	private planRevisions = new Map<string, number>();
 	private checkRuns = new Map<string, Map<string, CheckRunEvidence>>(); // taskId → check → latest
 	/** Bounded context manifest builder for the fresh reviewer. */
 
@@ -186,19 +188,27 @@ export class SymphonyCore {
 		cfg.project.taskPrefix = answers.taskPrefix.toUpperCase();
 		cfg.project.targetBranch = answers.targetBranch;
 		cfg.project.name = detection.projectName;
-		cfg.commands = {};
+		// Merge proposals into any existing command definitions so re-init
+		// never drops env_allowlist / max_output_bytes / cwd customizations.
 		for (const check of answers.checks) {
+			const existing = cfg.commands[check.name];
 			cfg.commands[check.name] = {
+				...(existing ?? {}),
 				argv: check.argv,
-				timeoutMs: 900_000,
-				required: true,
+				timeoutMs: existing?.timeoutMs ?? 900_000,
+				required: existing?.required ?? true,
 			};
 		}
 		if (cfg.commands["unit"] === undefined && answers.checks[0]) {
 			cfg.commands["unit"] = { ...cfg.commands[answers.checks[0]!.name]! };
 		}
-		cfg.checks.verify = Object.keys(cfg.commands).slice(0, 2);
-		cfg.checks.postIntegration = cfg.checks.verify;
+		const proposedNames = new Set(answers.checks.map((ch) => ch.name));
+		if (cfg.checks.verify.length === 0) {
+			cfg.checks.verify = [...proposedNames].slice(0, 2);
+		}
+		if (cfg.checks.postIntegration.length === 0) {
+			cfg.checks.postIntegration = cfg.checks.verify;
+		}
 		this.config = cfg;
 
 		mkdirSync(this.paths.root, { recursive: true });
@@ -314,6 +324,7 @@ export class SymphonyCore {
 	}
 
 	getTask(id: string): CommandResult<{ frontmatter: TaskFrontmatter; parsed: ParsedTask }> {
+		if (!isValidTaskId(id)) return { ok: false, error: `invalid task id "${id}"` };
 		const path = join(this.paths.tasksDir, taskFileName(id));
 		if (!existsSync(path)) return { ok: false, error: `unknown task ${id}` };
 		try {
@@ -329,21 +340,76 @@ export class SymphonyCore {
 		return this.reports.get(taskId)?.has(section) ?? false;
 	}
 
+	/** Latest report with provenance for one section. */
+	reportFor(taskId: string, section: ManagedSection): StageReport | undefined {
+		return this.reports.get(taskId)?.get(section);
+	}
+
 	/** Public read for adapters: latest check evidence per check name. */
 	checkRunsFor(taskId: string): Map<string, CheckRunEvidence> {
 		return this.checkRuns.get(taskId) ?? new Map<string, CheckRunEvidence>();
 	}
 
 	private evidenceFor(id: string, risks: string[], revision: string | null): EvidenceBundle {
-		const checks = this.checkRuns.get(id) ?? new Map<string, CheckRunEvidence>();
+		const checks = this.validateEvidenceArtifacts(id);
+		const planRevision = this.planRevisionOf(id);
 		return {
 			hasReport: (section) => this.hasReport(id, section),
-			planApproved: [...this.approvals.values()].some((a) => a.taskId === id && a.scope === "plan"),
+			reviewProvenance: this.reportFor(id, "review")?.origin,
+			planApproved: [...this.approvals.values()].some(
+				(a) =>
+					a.taskId === id &&
+					a.scope === "plan" &&
+					(planRevision === undefined || a.planRevision === undefined || a.planRevision >= planRevision),
+			),
 			checks,
 			checksRevision: null,
 			currentRevision: revision,
 			risks,
 		};
+	}
+
+	/**
+	 * Failure-table rule: a missing evidence artifact invalidates any pass
+	 * that depends on it. Runs whose persisted artifact vanished are
+	 * downgraded to `broken` before gates evaluate.
+	 */
+	/** Aggregate revision of the latest plan submission, from the ledger. */
+	private planRevisionOf(taskId: string): number | undefined {
+		if (this.planRevisions.has(taskId)) return this.planRevisions.get(taskId);
+		const events = this.ledger.read(taskId).filter((e) => e.type === "report.submitted" && e.data["section"] === "plan");
+		const last = events[events.length - 1];
+		const rev = last ? last.aggregateRevision : undefined;
+		if (rev !== undefined) this.planRevisions.set(taskId, rev);
+		return rev;
+	}
+
+	private validateEvidenceArtifacts(taskId: string): Map<string, CheckRunEvidence> {
+		const runs = this.checkRuns.get(taskId) ?? new Map<string, CheckRunEvidence>();
+		const dir = this.paths.checksDir(taskId);
+		for (const run of runs.values()) {
+			if (run.status !== "passed" || run.runId === "unavailable" || run.runId === "") continue;
+			const artifact = join(dir, `${run.check}-${run.runId}.json`);
+			if (!existsSync(artifact)) {
+				(runs.get(run.check) as CheckRunEvidence).status = "broken";
+			}
+		}
+		return runs;
+	}
+
+	/** Resolve a user-supplied revision expression to a full sha. */
+	private async resolveRevision(expression: string): Promise<{ ok: true; revision: string } | { ok: false; error: string }> {
+		const trimmed = expression.trim();
+		if (!/^[0-9a-fA-F]{40}$/.test(trimmed)) {
+			const revParse = await this.deps.gitExec(["rev-parse", "--verify", `${trimmed}^{commit}`], { cwd: this.deps.repoRoot });
+			if (revParse.code !== 0) {
+				return { ok: false, error: `cannot resolve revision "${trimmed}": ${revParse.stderr.trim() || "not found"}` };
+			}
+			const sha = revParse.stdout.trim();
+			if (!/^[0-9a-f]{40}$/.test(sha)) return { ok: false, error: `unexpected revision output for "${trimmed}"` };
+			return { ok: true, revision: sha };
+		}
+		return { ok: true, revision: trimmed.toLowerCase() };
 	}
 
 	/**
@@ -354,27 +420,43 @@ export class SymphonyCore {
 		return (await gitSnapshot(this.deps.gitExec, this.deps.repoRoot)).revision;
 	}
 
-	/** Structured report submission (V01-WF-002: models never force transitions). */
+	/**
+	 * Structured report submission (V01-WF-002: models never force transitions).
+	 * `origin` records provenance; the review gate only trusts fresh-reviewer
+	 * sessions and explicit human approvals.
+	 */
 	submitReport(input: {
 		taskId: string;
 		section: ManagedSection;
 		summary: string;
 		details: Record<string, unknown>;
+		origin?: StageReport["origin"];
 	}): CommandResult<{ stageAfter: TaskStage }> {
+		if (!isValidTaskId(input.taskId)) return { ok: false, error: `invalid task id "${input.taskId}"` };
 		const task = this.getTask(input.taskId);
 		if (!task.ok) return { ok: false, error: task.error };
 		const fm = task.value.frontmatter;
+		const origin: StageReport["origin"] = input.origin ?? "model";
 		const report: StageReport = {
 			section: input.section,
 			summary: input.summary,
 			details: input.details,
 			submittedAt: new Date().toISOString(),
+			origin,
 		};
 		const path = join(this.paths.tasksDir, taskFileName(input.taskId));
+		// Plans that discover risks must merge them into the task contract:
+		// the approval policy evaluates the union of creation- and plan-time risks.
+		let mergedRisks = fm.risks;
+		if (input.section === "plan" && Array.isArray(input.details["risks"])) {
+			const newRisks = (input.details["risks"] as unknown[]).map(String).filter((r) => !fm.risks.includes(r));
+			if (newRisks.length > 0) mergedRisks = [...fm.risks, ...newRisks];
+		}
 		try {
 			writeTaskFileAtomic(
 				path,
 				(parsed) => {
+					if (mergedRisks !== fm.risks) parsed.frontmatter.risks = mergedRisks;
 					setManagedSection(parsed, input.section, renderManagedSection(input.section, report));
 				},
 				{ expectedRevision: fm.revision },
@@ -385,26 +467,38 @@ export class SymphonyCore {
 		this.ledger.append(input.taskId, "report.submitted", {
 			section: input.section,
 			summaryLength: input.summary.length,
+			origin,
+			mergedRisks: mergedRisks.length,
 		}, { aggregateRevision: fm.revision + 1 });
-		const sections = this.reports.get(input.taskId) ?? new Set<ManagedSection>();
-		sections.add(input.section);
+		const sections = this.reports.get(input.taskId) ?? new Map<ManagedSection, StageReport>();
+		sections.set(input.section, report);
 		this.reports.set(input.taskId, sections);
+		// Keep the plan-revision view fresh: a new plan voids stale approvals.
+		if (input.section === "plan") this.planRevisions.set(input.taskId, fm.revision + 1);
 		this.rebuildIndex();
+		const risksNow = mergedRisks.length > 0 ? mergedRisks : fm.risks;
 
 		// Auto-advance only when the deterministic gate is satisfied.
 		let stageAfter: TaskStage = fm.stage;
 		if (fm.stage === "plan" && input.section === "plan") {
-			const gate = evaluateGate("plan", "build", this.evidenceFor(input.taskId, fm.risks, null), this.config);
-			const approvalNeeded = needsPlanApproval(this.config, { risks: fm.risks });
+			const gate = evaluateGate("plan", "build", this.evidenceFor(input.taskId, risksNow, null), this.config);
+			const approvalNeeded = needsPlanApproval(this.config, { risks: risksNow });
 			if (gate.ok && !approvalNeeded) {
 				const moved = this.transition(input.taskId, "build");
 				if (moved.ok) stageAfter = moved.value.stage;
-			}
-			else if (gate.ok && approvalNeeded)
+			} else if (approvalNeeded) {
 				this.ledger.append(input.taskId, "approval.requested", { scope: "plan", reason: "risks declared" }, { aggregateRevision: fm.revision + 1 });
+				return {
+					ok: true,
+					value: { stageAfter },
+					next: mergedRisks !== fm.risks
+						? `plan recorded; ${mergedRisks.length - fm.risks.length} newly declared risk(s) require approval before build`
+						: "plan recorded; approval required before build",
+				};
+			}
 		}
 		if (fm.stage === "build" && input.section === "implementation") {
-			const gate = evaluateGate("build", "review", this.evidenceFor(input.taskId, fm.risks, null), this.config);
+			const gate = evaluateGate("build", "review", this.evidenceFor(input.taskId, risksNow, null), this.config);
 			if (gate.ok) {
 				const moved = this.transition(input.taskId, "review");
 				if (moved.ok) stageAfter = moved.value.stage;
@@ -417,12 +511,20 @@ export class SymphonyCore {
 		if (!input.approved) return { ok: true, value: {}, next: "approval rejected — task stays in plan" };
 		const task = this.getTask(input.taskId);
 		if (!task.ok) return { ok: false, error: task.error };
+		// Approvals are bound to the plan revision they reviewed: a new plan
+		// submission invalidates a prior approval (E5).
+		const planRevision = this.planRevisionOf(input.taskId);
+		const prior = this.approvals.get(`${input.taskId}:${input.scope}`);
+		if (prior && planRevision !== undefined && prior.planRevision !== undefined && prior.planRevision < planRevision) {
+			this.approvals.delete(`${input.taskId}:${input.scope}`);
+		}
 		const approval: ApprovalRecord = {
 			id: monotonicId(),
 			scope: input.scope,
 			taskId: input.taskId,
 			actor: input.actor,
 			inputRevision: task.value.frontmatter.revision,
+			planRevision,
 			configHash: configHash(this.config),
 			approvedAt: new Date().toISOString(),
 		};
@@ -441,12 +543,25 @@ export class SymphonyCore {
 		return { ok: true, value: {}, next: "plan approved — build can start" };
 	}
 
-	/** Validated stage transition (V01-WF-001). */
-	transition(taskId: string, to: TaskStage, options: { force?: boolean } = {}): CommandResult<{ stage: TaskStage }> {
+	/**
+	 * Validated stage transition (V01-WF-001). Check-gated edges (→ ready,
+	 * → done) always evaluate freshness against the *live* revision —
+	 * `transition()` refuses those edges synchronously when a revision read
+	 * is required; use advanceToReady/completeTask for those paths.
+	 */
+	transition(taskId: string, to: TaskStage): CommandResult<{ stage: TaskStage }> {
+		if (!isValidTaskId(taskId)) return { ok: false, error: `invalid task id "${taskId}"` };
 		const task = this.getTask(taskId);
 		if (!task.ok) return { ok: false, error: task.error };
 		const from = task.value.frontmatter.stage;
 		if (from === to) return { ok: true, value: { stage: to } };
+		const contract = contractFor(from, to);
+		if (contract.requiresChecks) {
+			return {
+				ok: false,
+				error: `${from} → ${to} requires fresh check evidence; run the async command path (${to === "ready" ? "advanceToReady" : "completeTask"}) so revision freshness is verified`,
+			};
+		}
 		try {
 			assertTransition(from, to);
 		} catch (err) {
@@ -483,6 +598,7 @@ export class SymphonyCore {
 				join(this.paths.tasksDir, taskFileName(taskId)),
 				(parsed) => {
 					parsed.frontmatter.runState = to;
+					if (to === "running") parsed.frontmatter.pinnedConfigHash = configHash(this.config);
 				},
 				{ expectedRevision: task.value.frontmatter.revision },
 			);
@@ -517,8 +633,8 @@ export class SymphonyCore {
 			tryNumber: priorTries + 1,
 			pinnedConfigHash: configHash(this.config),
 		};
-		this.attempts.set(attempt.id, attempt);
-		this.lease.acquire({
+		this.attempts.set(`${taskId}#${attempt.id}`, attempt);
+		const leased = this.lease.acquire({
 			taskId,
 			stage,
 			pid: this.deps.pid ?? process.pid,
@@ -526,6 +642,14 @@ export class SymphonyCore {
 			acquiredAt: new Date().toISOString(),
 			heartbeatAt: new Date().toISOString(),
 		});
+		if (!leased) {
+			this.attempts.delete(`${taskId}#${attempt.id}`);
+			const holder = this.lease.status().record;
+			return {
+				ok: false,
+				error: `another live Symphony process holds the execution lease${holder ? ` (${holder.taskId} ${holder.stage}, pid ${holder.pid})` : ""}; release or reclaim it first`,
+			};
+		}
 		this.ledger.append(taskId, "attempt.started", { stage, tryNumber: attempt.tryNumber }, { aggregateRevision: task.value.frontmatter.revision, attemptId: attempt.id });
 		this.ledger.append(taskId, "lease.acquired", { stage, pid: this.deps.pid ?? process.pid }, { aggregateRevision: task.value.frontmatter.revision, attemptId: attempt.id });
 		this.setRunState(taskId, "running");
@@ -533,7 +657,7 @@ export class SymphonyCore {
 	}
 
 	completeAttempt(taskId: string, attemptId: string, status: "passed" | "failed" | "cancelled"): CommandResult<{}> {
-		const attempt = this.attempts.get(attemptId);
+		const attempt = this.attempts.get(`${taskId}#${attemptId}`);
 		if (!attempt || attempt.taskId !== taskId) return { ok: false, error: `unknown attempt ${attemptId}` };
 		attempt.status = status;
 		attempt.endedAt = new Date().toISOString();
@@ -545,8 +669,23 @@ export class SymphonyCore {
 		return { ok: true, value: {} };
 	}
 
+	/**
+	 * Resume continues the interrupted attempt with the same id — it does
+	 * not consume the retry budget. Retry creates a new attempt and does.
+	 */
+	resumeAttempt(taskId: string, attemptId: string): CommandResult<{ attemptId: string }> {
+		const attempt = this.attempts.get(`${taskId}#${attemptId}`);
+		if (!attempt || attempt.taskId !== taskId) return { ok: false, error: `unknown attempt ${attemptId}` };
+		if (attempt.status !== "interrupted") return { ok: false, error: `attempt ${attemptId} is ${attempt.status}; only interrupted attempts resume` };
+		attempt.status = "running";
+		attempt.endedAt = undefined;
+		this.ledger.append(taskId, "attempt.started", { stage: attempt.stage, tryNumber: attempt.tryNumber, resumed: true }, { aggregateRevision: 0, attemptId });
+		this.setRunState(taskId, "running");
+		return { ok: true, value: { attemptId } };
+	}
+
 	interruptAttempt(taskId: string, attemptId: string): CommandResult<{}> {
-		const attempt = this.attempts.get(attemptId);
+		const attempt = this.attempts.get(`${taskId}#${attemptId}`);
 		if (!attempt || attempt.taskId !== taskId) return { ok: false, error: `unknown attempt ${attemptId}` };
 		attempt.status = "interrupted";
 		attempt.endedAt = new Date().toISOString();
@@ -559,32 +698,42 @@ export class SymphonyCore {
 	 * V01-REC-001: on load, any running attempt from a dead process becomes
 	 * Interrupted. Never resumed automatically; no duplicate attempts.
 	 */
-	recover(): CommandResult<{ interrupted: string[]; reclaimedLease: boolean }> {
-		const interrupted: string[] = [];
-		for (const [id, attempt] of this.attempts) {
-			if (attempt.status !== "running") continue;
-			attempt.status = "interrupted";
-			attempt.endedAt = new Date().toISOString();
-			this.ledger.append(attempt.taskId, "attempt.interrupted", { stage: attempt.stage, status: "interrupted" }, { aggregateRevision: 0, attemptId: id });
-			interrupted.push(id);
-		}
+	recover(): CommandResult<{ interrupted: string[]; reclaimedLease: boolean; leaseHeldByLiveProcess: boolean }> {
+		// Ownership validation before touching anything: a live foreign owner
+		// keeps its attempts and its lease (V01-REC-001 / stale-lease row).
 		const leaseStatus = this.lease.status();
+		const leaseIsOurs = leaseStatus.record
+			? leaseStatus.record.pid === (this.deps.pid ?? process.pid) && leaseStatus.record.sessionId === (this.deps.sessionId ?? "unknown")
+			: false;
+		const foreignLive = leaseStatus.held && !leaseIsOurs;
+		const interrupted: string[] = [];
+		if (!foreignLive) {
+			for (const [key, attempt] of this.attempts) {
+				if (attempt.status !== "running") continue;
+				attempt.status = "interrupted";
+				attempt.endedAt = new Date().toISOString();
+				this.ledger.append(attempt.taskId, "attempt.interrupted", { stage: attempt.stage, status: "interrupted" }, { aggregateRevision: 0, attemptId: attempt.id });
+				interrupted.push(key.split("#")[1] ?? attempt.id);
+			}
+		}
 		let reclaimedLease = false;
 		if (leaseStatus.stale) {
 			this.lease.release();
 			reclaimedLease = true;
 		}
-		for (const task of this.listTasks()) {
-			if (task.runState === "running" || task.runState === "waiting") {
-				if (interrupted.length > 0 || leaseStatus.stale) {
-					this.setRunState(task.id, "interrupted");
+		if (!foreignLive) {
+			for (const task of this.listTasks()) {
+				if (task.runState === "running" || task.runState === "waiting") {
+					if (interrupted.length > 0 || leaseStatus.stale) {
+						this.setRunState(task.id, "interrupted");
+					}
 				}
 			}
 		}
 		if (interrupted.length > 0 || reclaimedLease) {
 			this.ledger.append("runtime", "recovery.completed", { interrupted, reclaimedLease }, { aggregateRevision: 0 });
 		}
-		return { ok: true, value: { interrupted, reclaimedLease } };
+		return { ok: true, value: { interrupted, reclaimedLease, leaseHeldByLiveProcess: foreignLive } };
 	}
 
 	shutdown(): void {
@@ -629,7 +778,7 @@ export class SymphonyCore {
 				env: buildCheckEnv(def, this.deps.env ?? process.env),
 				executor: this.deps.checkExecutor,
 			});
-			persistCheckEvidence(this.paths.checksDir(taskId), outcome.evidence);
+			const persisted: { path: string; digest: string } = persistCheckEvidence(this.paths.checksDir(taskId), outcome.evidence);
 			runs.set(name, outcome.evidence);
 			results[name] = outcome.evidence;
 			this.ledger.append(taskId, "check.completed", {
@@ -637,6 +786,8 @@ export class SymphonyCore {
 				status: outcome.status,
 				revision,
 				runId: outcome.evidence.runId,
+				// Digest binds the artifact to the ledger: tampering is detectable.
+				artifactDigest: persisted.digest,
 			}, { aggregateRevision: task.value.frontmatter.revision });
 		}
 		this.checkRuns.set(taskId, runs);
@@ -671,6 +822,17 @@ export class SymphonyCore {
 		this.rebuildIndex();
 	}
 
+	/** Config drift check: attempts are pinned to their starting config hash. */
+	private configDriftError(taskId: string): string | undefined {
+		const task = this.getTask(taskId);
+		if (!task.ok) return undefined;
+		const pinned = task.value.frontmatter.pinnedConfigHash;
+		if (pinned && pinned !== configHash(this.config)) {
+			return `configuration changed during this task (pinned ${pinned.slice(0, 8)}, now ${configHash(this.config).slice(0, 8)}); start a new attempt so the new policy applies`;
+		}
+		return undefined;
+	}
+
 	/** V01-QA-002: gate Ready/Done on fresh required-check evidence. */
 	async advanceToReady(taskId: string): Promise<CommandResult<{ stage: TaskStage }>> {
 		const task = this.getTask(taskId);
@@ -678,6 +840,8 @@ export class SymphonyCore {
 		if (task.value.frontmatter.stage !== "verify") {
 			return { ok: false, error: `task is in ${task.value.frontmatter.stage}; verify runs from verify` };
 		}
+		const drift = this.configDriftError(taskId);
+		if (drift) return { ok: false, error: `cannot reach Ready: ${drift}` };
 		await this.runCheckSet(taskId, "verify");
 		const revision = await this.currentRevision();
 		const gate = evaluateGate(
@@ -687,7 +851,7 @@ export class SymphonyCore {
 			this.config,
 		);
 		if (!gate.ok) return { ok: false, error: `cannot reach Ready: ${gate.reason}` };
-		return this.transition(taskId, "ready");
+		return this.writeTransition(taskId, "ready");
 	}
 
 	// ---------------------------------------------------------------------------
@@ -706,7 +870,25 @@ export class SymphonyCore {
 			return { ok: false, error: "integration is recorded from Ready only" };
 		}
 		const target = task.value.frontmatter.targetBranch ?? this.config.project.targetBranch;
-		const verify = await revisionOnBranch(this.deps.gitExec, this.deps.repoRoot, input.revision, target);
+		const isGit = (await gitSnapshot(this.deps.gitExec, this.deps.repoRoot)).isRepo;
+		if (!isGit) {
+			// Non-Git checkout: revision evidence is marked unavailable rather
+			// than blocking the workflow (PRD failure table, "Git unavailable").
+			const record0: IntegrationRecord = {
+				revision: "worktree",
+				targetBranch: target,
+				integratedAt: new Date().toISOString(),
+				actor: input.actor,
+				note: input.note ?? "non-Git checkout: revision evidence unavailable",
+			};
+			return this.writeIntegration(task.value.frontmatter, record0);
+		}
+		// Resolve symbolic refs ("HEAD", branch names) to a full sha — storing
+		// "HEAD" would never match the checkout later and wedge the task (O1).
+		const resolved = await this.resolveRevision(input.revision);
+		if (!resolved.ok) return { ok: false, error: resolved.error };
+		const revisionSha = resolved.revision;
+		const verify = await revisionOnBranch(this.deps.gitExec, this.deps.repoRoot, revisionSha, target);
 		if (!verify.present) {
 			const cause = verify.error?.includes("no such commit")
 				? "revision does not exist in this repository"
@@ -717,37 +899,17 @@ export class SymphonyCore {
 				ok: false,
 				error: cause
 					? `${cause} — integration requires a commit present on "${target}"`
-					: `revision ${input.revision.slice(0, 10)} is not on target branch "${target}"`,
+					: `revision ${revisionSha.slice(0, 10)} is not on target branch "${target}"`,
 			};
 		}
 		const record: IntegrationRecord = {
-			revision: input.revision,
+			revision: revisionSha,
 			targetBranch: target,
 			integratedAt: new Date().toISOString(),
 			actor: input.actor,
 			note: input.note,
 		};
-		try {
-			writeTaskFileAtomic(
-				join(this.paths.tasksDir, taskFileName(input.taskId)),
-				(parsed) => {
-					parsed.frontmatter.integration = record;
-					parsed.frontmatter.stage = "postverify";
-					setManagedSection(parsed, "integration", renderManagedSection("integration", undefined, [
-						`Integrated by ${record.actor} at ${record.integratedAt}`,
-						`Revision: ${record.revision}`,
-						`Target branch: ${record.targetBranch}`,
-						record.note ? `Note: ${record.note}` : "",
-					].filter(Boolean)));
-				},
-				{ expectedRevision: task.value.frontmatter.revision },
-			);
-		} catch (err) {
-			return this.handleWriteError(err);
-		}
-		this.ledger.append(input.taskId, "integration.recorded", { ...record }, { aggregateRevision: task.value.frontmatter.revision + 1 });
-		this.rebuildIndex();
-		return { ok: true, value: {}, next: "run /sym complete to verify against the integrated revision" };
+		return this.writeIntegration(task.value.frontmatter, record);
 	}
 
 	/** V01-COMP-001: verify the declared revision and rerun post-integration checks. */
@@ -757,18 +919,30 @@ export class SymphonyCore {
 		if (task.value.frontmatter.stage !== "postverify") {
 			return { ok: false, error: "completion runs from post-integration verify" };
 		}
+		const drift = this.configDriftError(input.taskId);
+		if (drift) return { ok: false, error: `cannot complete: ${drift}` };
 		const integration = task.value.frontmatter.integration;
 		if (!integration) return { ok: false, error: "no integration record — record integration first" };
-		const onBranch = await revisionOnBranch(this.deps.gitExec, this.deps.repoRoot, integration.revision, integration.targetBranch);
-		if (!onBranch.present) {
-			return { ok: false, error: `integrated revision ${integration.revision.slice(0, 10)} is no longer present on ${integration.targetBranch}` };
+		const snapshotNow = await gitSnapshot(this.deps.gitExec, this.deps.repoRoot);
+		if (snapshotNow.isRepo) {
+			const onBranch = await revisionOnBranch(this.deps.gitExec, this.deps.repoRoot, integration.revision, integration.targetBranch);
+			if (!onBranch.present) {
+				return { ok: false, error: `integrated revision ${integration.revision.slice(0, 10)} is no longer present on ${integration.targetBranch}` };
+			}
 		}
 		const revision = await this.currentRevision();
-		if (revision && revision !== integration.revision) {
-			// checkout must be at the integrated revision for post-integration checks
+		if (snapshotNow.isRepo && revision && revision !== integration.revision) {
+			// Checkout must sit at the integrated revision for post-integration
+			// checks. Offer an explicit repair: re-record at the current revision
+			// if it is itself on the target branch (e.g. integration moved on).
+			const onTarget = await revisionOnBranch(this.deps.gitExec, this.deps.repoRoot, revision, integration.targetBranch);
+			if (onTarget.present) {
+				const repaired = await this.recordIntegration({ taskId: input.taskId, revision, actor: "auto-repair", note: `re-recorded from ${integration.revision.slice(0, 10)} (current checkout is on target)` });
+				if (repaired.ok) return this.completeTask({ taskId: input.taskId });
+			}
 			return {
 				ok: false,
-				error: `current checkout is ${revision.slice(0, 10)} but integration declares ${integration.revision.slice(0, 10)}; check out the integrated revision and retry`,
+				error: `current checkout is ${revision.slice(0, 10)} but integration declares ${integration.revision.slice(0, 10)}; check out the integrated revision and retry, or re-record integration`,
 			};
 		}
 		const checks = await this.runCheckSet(input.taskId, "postIntegration");
@@ -780,6 +954,7 @@ export class SymphonyCore {
 			this.config,
 		);
 		if (!gate.ok) return { ok: false, error: `cannot complete: ${gate.reason}` };
+		// writeTransition happens below with the closeout section (already gated)
 		const closeoutExtras: string[] = [
 			`Completed at ${new Date().toISOString()}`,
 			`Integrated revision: ${integration.revision} on ${integration.targetBranch}`,
@@ -804,6 +979,51 @@ export class SymphonyCore {
 		return { ok: true, value: { stage: "done" }, next: "task closed with full evidence trail" };
 	}
 
+	/** Transition writer for already-validated check-gated edges. */
+	private writeTransition(taskId: string, to: TaskStage): CommandResult<{ stage: TaskStage }> {
+		const task = this.getTask(taskId);
+		if (!task.ok) return { ok: false, error: task.error };
+		const from = task.value.frontmatter.stage;
+		try {
+			writeTaskFileAtomic(
+				join(this.paths.tasksDir, taskFileName(taskId)),
+				(parsed) => {
+					parsed.frontmatter.stage = to;
+				},
+				{ expectedRevision: task.value!.frontmatter.revision },
+			);
+		} catch (err) {
+			return this.handleWriteError(err);
+		}
+		this.ledger.append(taskId, "task.stage_changed", { from, to }, { aggregateRevision: task.value.frontmatter.revision + 1 });
+		this.rebuildIndex();
+		return { ok: true, value: { stage: to }, next: `task ${taskId}: ${from} → ${to}` };
+	}
+
+	private writeIntegration(fm: TaskFrontmatter, record: IntegrationRecord): CommandResult<{}> {
+		try {
+			writeTaskFileAtomic(
+				join(this.paths.tasksDir, taskFileName(fm.id)),
+				(parsed) => {
+					parsed.frontmatter.integration = record;
+					parsed.frontmatter.stage = "postverify";
+					setManagedSection(parsed, "integration", renderManagedSection("integration", undefined, [
+						`Integrated by ${record.actor} at ${record.integratedAt}`,
+						`Revision: ${record.revision}`,
+						`Target branch: ${record.targetBranch}`,
+						record.note ? `Note: ${record.note}` : "",
+					].filter(Boolean)));
+				},
+				{ expectedRevision: fm.revision },
+			);
+		} catch (err) {
+			return this.handleWriteError(err);
+		}
+		this.ledger.append(fm.id, "integration.recorded", { ...record }, { aggregateRevision: fm.revision + 1 });
+		this.rebuildIndex();
+		return { ok: true, value: {}, next: "run /sym complete to verify against the integrated revision" };
+	}
+
 	// ---------------------------------------------------------------------------
 	// Projections (TUI + future HTML)
 	// ---------------------------------------------------------------------------
@@ -815,7 +1035,7 @@ export class SymphonyCore {
 		if (!active) {
 			return [`SYMPHONY  ${tasks.length} task(s) · no active task · /sym new`];
 		}
-		const acDone = active.acceptance.length; // AC progress detailed in overlay
+		const acDone = this.acceptanceMet(active.id);
 		const checks = this.checkRuns.get(active.id);
 		const checkState = checks && checks.size > 0
 			? [...checks.values()].every((r) => r.status === "passed")
@@ -867,7 +1087,9 @@ export class SymphonyCore {
 			...summary.paths.slice(0, 50).map((p) => `- ${p.path} +${p.added}/-${p.removed}`),
 			"",
 			"### Diff",
+			"<diff>",
 			diff.text || "(no uncommitted changes)",
+			"</diff>",
 			"",
 			"### Existing evidence",
 			...[...(this.checkRuns.get(taskId)?.values() ?? [])].map((r) => `- ${r.check}: ${r.status} at ${r.revision ?? "none"}`),
@@ -879,7 +1101,23 @@ export class SymphonyCore {
 	// Internals
 	// ---------------------------------------------------------------------------
 
+	/** Count acceptance criteria the latest implementation report marks met. */
+	acceptanceMet(taskId: string): number {
+		const report = this.reportFor(taskId, "implementation");
+		const statuses = report?.details["acceptance_status"];
+		if (!Array.isArray(statuses)) return 0;
+		return statuses.filter((s) => (s as { status?: string })?.status === "met").length;
+	}
+
+	private integrityIssues: string[] = [];
+
+	/** Divergence between task files and the ledger, detected at load (E1/E2). */
+	integrityReport(): string[] {
+		return [...this.integrityIssues];
+	}
+
 	private replay(): void {
+		this.integrityIssues = [];
 		if (!existsSync(this.paths.tasksDir)) return;
 		for (const file of readdirSync(this.paths.tasksDir)) {
 			if (!file.endsWith(".md")) continue;
@@ -887,11 +1125,31 @@ export class SymphonyCore {
 				const fm = parseTaskFile(readFileSync(join(this.paths.tasksDir, file), "utf8")).frontmatter;
 				const events = this.ledger.read(fm.id);
 				this.restoreFromEvents(fm.id, events);
+				// Reconcile: the ledger's last stage opinion must not lag behind
+				// the file's stage (a hand-edited file forging Done/Ready).
+				const stageEvents = events.filter((e) => e.type === "task.stage_changed");
+				const lastTo = stageEvents[stageEvents.length - 1]?.data["to"];
+				const fileStage = fm.stage;
+				const ordered = ["backlog", "plan", "build", "review", "verify", "ready", "postverify", "done"];
+				const parked = ["blocked", "cancelled"];
+				if (typeof lastTo === "string" && lastTo !== fileStage) {
+					const li = ordered.indexOf(String(lastTo));
+					const fi = ordered.indexOf(fileStage);
+					if (fi > li && !parked.includes(fileStage)) {
+						this.integrityIssues.push(
+							`task ${fm.id}: file says stage "${fileStage}" but the ledger's last recorded stage is "${lastTo}" — task file was edited outside Symphony; gates will use the ledger view`,
+						);
+						// Gates trust the ledger: clamp the in-memory view.
+						this.stageOverrides.set(fm.id, String(lastTo) as TaskStage);
+					}
+				}
 			} catch {
 				// skip unreadable
 			}
 		}
 	}
+
+	private stageOverrides = new Map<string, TaskStage>();
 
 	private restoreFromEvents(taskId: string, events: SymphonyEvent[]): void {
 		let attempt: AttemptRecord | undefined;
@@ -918,14 +1176,14 @@ export class SymphonyCore {
 						status: "running",
 						startedAt: event.emittedAt,
 						tryNumber: Number(event.data["tryNumber"] ?? 1),
-						pinnedConfigHash: "",
+						pinnedConfigHash: String(event.data["pinnedConfigHash"] ?? ""),
 					};
-					this.attempts.set(attempt.id, attempt);
+					this.attempts.set(`${taskId}#${attempt.id}`, attempt);
 					break;
 				case "attempt.completed":
 				case "attempt.interrupted": {
 					const id = event.attemptId;
-					const record = id ? this.attempts.get(id) : attempt;
+					const record = id ? this.attempts.get(`${taskId}#${id}`) : attempt;
 					if (record) {
 						record.status = String(event.data["status"]) as AttemptRecord["status"];
 						record.endedAt = event.emittedAt;
@@ -934,8 +1192,16 @@ export class SymphonyCore {
 				}
 				case "report.submitted":
 					{
-						const sections = this.reports.get(taskId) ?? new Set<ManagedSection>();
-						sections.add(String(event.data["section"]) as ManagedSection);
+						const sections = this.reports.get(taskId) ?? new Map<ManagedSection, StageReport>();
+						const section = String(event.data["section"]) as ManagedSection;
+						const origin = String(event.data["origin"] ?? "model");
+						sections.set(section, {
+							section,
+							summary: "",
+							details: {},
+							submittedAt: event.emittedAt,
+							origin: origin === "fresh-reviewer" || origin === "manual" ? origin : "model",
+						});
 						this.reports.set(taskId, sections);
 					}
 					break;
@@ -967,13 +1233,23 @@ export class SymphonyCore {
 			command: [],
 		});
 		this.checkRuns.set(taskId, runs);
-		// Rehydrate full artifacts from disk when available.
+		// Rehydrate full artifacts from disk, but only when they still match
+		// the digest recorded in the ledger (E2: tampered evidence → broken).
+		const expectedDigest = event.data["artifactDigest"];
 		const dir = this.paths.checksDir(taskId);
 		if (existsSync(dir)) {
 			for (const file of readdirSync(dir)) {
 				if (!file.startsWith(`${name}-`) || !file.endsWith(".json")) continue;
 				try {
 					const evidence = JSON.parse(readFileSync(join(dir, file), "utf8")) as CheckRunEvidence;
+					if (typeof expectedDigest === "string" && expectedDigest.length > 0) {
+						if (evidence.runId !== String(event.data["runId"] ?? "")) continue; // older artifact
+						if (!verifyCheckEvidenceDigest(dir, evidence, expectedDigest)) {
+							// Artifact altered after the fact: distrust it entirely.
+							runs.set(name, { ...evidence, status: "broken" });
+							continue;
+						}
+					}
 					const current = runs.get(name);
 					if (!current || (evidence.finishedAt ?? "") >= (current.finishedAt ?? "")) runs.set(name, evidence);
 				} catch {
@@ -1052,7 +1328,7 @@ function serializeConfigYaml(config: SymphonyConfig): string {
 	lines.push(`  post_integration: [${config.checks.postIntegration.map((c) => yamlScalar(c)).join(", ")}]`);
 	lines.push("security:");
 	lines.push(`  protected_paths: [${config.security.protectedPaths.map((p) => yamlScalar(p)).join(", ")}]`);
-	if (config.security.protectedPathPolicy) lines.push(`  protected_path_policy: ${config.security.protectedPathPolicy}`);
+	lines.push(`  protected_path_policy: ${config.security.protectedPathPolicy ?? "confirm"}`);
 	lines.push("limits:");
 	lines.push(`  max_child_sessions: ${config.limits.maxChildSessions}`);
 	lines.push(`  max_stage_retries: ${config.limits.maxStageRetries}`);
@@ -1060,5 +1336,8 @@ function serializeConfigYaml(config: SymphonyConfig): string {
 }
 
 function yamlScalar(value: string): string {
+	// Quote YAML-unsafe scalars: booleans, nulls, numbers would change type on round-trip.
+	if (/^(?:true|false|null|yes|no|on|off|~)$/i.test(value)) return JSON.stringify(value);
+	if (/^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(value)) return JSON.stringify(value);
 	return /^[A-Za-z0-9_./@-]+$/.test(value) ? value : JSON.stringify(value);
 }

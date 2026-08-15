@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Symphony</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<header>
+	<h1>Symphony</h1>
+	<span id="connection" class="state disconnected">Disconnected</span>
+	<span id="repo" class="dim"></span>
+	<nav aria-label="Primary">
+		<button data-view="overview" class="nav active">Overview</button>
+		<button data-view="tasks" class="nav">Tasks</button>
+		<button data-view="run" class="nav">Active Run</button>
+		<button data-view="review" class="nav">Review</button>
+		<button data-view="verification" class="nav">Verification</button>
+		<button data-view="configuration" class="nav">Configuration</button>
+		<button data-view="diagnostics" class="nav">Diagnostics</button>
+	</nav>
+</header>
+<main id="view" tabindex="0" aria-live="polite"></main>
+<footer>
+	<span id="status" class="dim"></span>
+	<span id="events" class="dim"></span>
+</footer>
+<script src="/app.js"></script>
+</body>
+</html>

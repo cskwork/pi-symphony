@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { assertValidTaskId } from "./ids.ts";
 
 /** Canonical `.symphony` directory layout for one repository checkout. */
 export interface SymphonyPaths {
@@ -29,12 +30,12 @@ export function symphonyPaths(repoRoot: string): SymphonyPaths {
 		configLocal: join(base, "config.local.yaml"),
 		tasksDir: join(base, "tasks"),
 		promptsDir: join(base, "prompts"),
-		evidenceDir: (taskId: string) => join(evidence, taskId),
-		checksDir: (taskId: string) => join(evidence, taskId, "checks"),
-		reviewDir: (taskId: string) => join(evidence, taskId, "review"),
-		integrationDir: (taskId: string) => join(evidence, taskId, "integration"),
+		evidenceDir: (taskId: string) => contained(taskId, evidence),
+		checksDir: (taskId: string) => containedDir(taskId, evidence, "checks"),
+		reviewDir: (taskId: string) => containedDir(taskId, evidence, "review"),
+		integrationDir: (taskId: string) => containedDir(taskId, evidence, "integration"),
 		runtimeDir: runtime,
-		eventsFile: (taskId: string) => join(runtime, "events", `${taskId}.jsonl`),
+		eventsFile: (taskId: string) => contained(taskId, join(runtime, "events"), ".jsonl"),
 		leaseFile: join(runtime, "leases", "active.json"),
 		cacheDir: join(runtime, "cache"),
 		taskIndex: join(runtime, "cache", "task-index.json"),
@@ -42,7 +43,21 @@ export function symphonyPaths(repoRoot: string): SymphonyPaths {
 	};
 }
 
+/** Defense in depth: derived paths must stay inside their base directory. */
+function contained(taskId: string, base: string, suffix = ""): string {
+	assertValidTaskId(taskId);
+	const resolved = join(base, `${taskId}${suffix}`);
+	if (!resolved.startsWith(base)) throw new Error(`path escapes .symphony: ${taskId}`);
+	return resolved;
+}
+
+function containedDir(taskId: string, base: string, sub: string): string {
+	assertValidTaskId(taskId);
+	return join(base, taskId, sub);
+}
+
 /** Task markdown file name (one file per task, collision-safe IDs). */
 export function taskFileName(taskId: string): string {
+	assertValidTaskId(taskId);
 	return `${taskId}.md`;
 }

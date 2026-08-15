@@ -14,6 +14,26 @@ const ALLOWED_SUBCOMMANDS = new Set([
 	"config",
 ]);
 
+/**
+ * Per-subcommand option allowlist (S3): deny-by-default for options, so
+ * `git log --exec=push`, `git config --add`, or `--output=` variants are
+ * rejected structurally rather than by verb denylist luck.
+ */
+const ALLOWED_OPTIONS: Record<string, RegExp[]> = {
+	status: [/^--porcelain$/, /^--short$/, /^-b$/, /^--branch$/],
+	diff: [/^--numstat$/, /^--stat$/, /^--name-only$/, /^--name-status$/, /^-U\d+$/, /^--abbrev(=[a-z0-9]+)?$/],
+	"rev-parse": [/^--abbrev-ref$/, /^--is-inside-work-tree$/, /^--show-toplevel$/, /^--short(=[a-z0-9]+)?$/, /^--verify$/],
+	log: [/^--oneline$/, /^-n$/, /^-\d+$/, /^--max-count=\d+$/, /^--format=/, /^--pretty=/],
+	branch: [/^--contains$/, /^--list$/, /^-a$/, /^--all$/, /^-v$/, /^--verbose$/],
+	show: [/^--stat$/, /^--name-only$/, /^--format=/, /^--pretty=/, /^-s$/],
+	"merge-base": [],
+	"ls-files": [/^--others$/, /^--modified$/, /^--stage$/, /^--error-unmatch$/],
+	config: [/^--get$/, /^--get-regexp$/],
+};
+
+/** Options that carry a value as a separate argv element (value consumed, not validated). */
+const OPTIONS_WITH_VALUE = new Set(["-n", "--max-count", "-U", "--abbrev"]);
+
 /** Destructive git verbs that must never appear in an inspection argv. */
 const FORBIDDEN_VERBS = new Set([
 	"push",
@@ -48,15 +68,23 @@ export function assertReadOnlyGit(argv: string[]): void {
 	if (argv.length === 0) throw new GitCommandError(argv);
 	const sub = argv[0]!;
 	if (!ALLOWED_SUBCOMMANDS.has(sub)) throw new GitCommandError(argv);
-	// Block option-embedded destructive verbs (e.g. `git log --exec=push`).
-	for (const arg of argv.slice(1)) {
-		if (arg.startsWith("-")) {
-			for (const verb of FORBIDDEN_VERBS) {
-				if (arg.includes(`${verb}=`) || arg === `--${verb}`) throw new GitCommandError(argv);
-			}
-		} else if (FORBIDDEN_VERBS.has(arg)) {
-			throw new GitCommandError(argv);
+	const optionAllowlist = ALLOWED_OPTIONS[sub] ?? [];
+	const args = argv.slice(1);
+	let expectingValue = false;
+	for (const arg of args) {
+		if (expectingValue) {
+			expectingValue = false; // consume the value of the previous option
+			continue;
 		}
+		if (arg.startsWith("-")) {
+			const base = arg.split("=")[0]!;
+			const allowed = optionAllowlist.some((re) => re.test(arg)) || optionAllowlist.some((re) => re.test(base));
+			if (!allowed) throw new GitCommandError(argv);
+			if (OPTIONS_WITH_VALUE.has(base) && !arg.includes("=")) expectingValue = true;
+			continue;
+		}
+		// positional: read-only references and paths only
+		if (FORBIDDEN_VERBS.has(arg)) throw new GitCommandError(argv);
 	}
 }
 

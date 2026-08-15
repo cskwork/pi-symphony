@@ -22,8 +22,19 @@ export interface ReviewReport {
 
 export interface ReviewerRunner {
 	/** Run a fresh review session over the manifest; returns the structured report. */
-	run(manifest: string, options: { signal?: AbortSignal; taskId: string }): Promise<ReviewReport>;
+	run(manifest: string, options: { signal?: AbortSignal; taskId: string; taskFilePath?: string }): Promise<ReviewReport>;
 }
+
+/** Reviewer role settings applied to the fresh session (PRD roles.reviewer). */
+export interface ReviewerRoleConfig {
+	model: string;
+	thinking: string;
+	maxTurns: number;
+	tools: string[];
+	repoRoot: string;
+}
+
+export const DEFAULT_REVIEWER_TOOLS = ["read", "grep", "find", "ls"];
 
 /**
  * Parse the reviewer's structured output. The reviewer is instructed to end
@@ -85,7 +96,29 @@ export function reviewPromptFor(manifest: string): string {
  * so the domain layer can run without the SDK in unit tests.
  */
 export class SdkReviewerRunner implements ReviewerRunner {
-	async run(manifest: string, options: { signal?: AbortSignal; taskId: string }): Promise<ReviewReport> {
+	constructor(private role: ReviewerRoleConfig = { model: "inherit", thinking: "high", maxTurns: 6, tools: DEFAULT_REVIEWER_TOOLS, repoRoot: process.cwd() }) {}
+
+	/**
+	 * Build the session options the fresh reviewer runs under. Exposed for
+	 * contract tests: verifies read-only tools, isolation, role settings.
+	 */
+	buildSessionPlan() {
+		return {
+			tools: this.role.tools.length > 0 ? [...this.role.tools] : [...DEFAULT_REVIEWER_TOOLS],
+			noExtensions: true,
+			noSkills: true,
+			noContextFiles: true,
+			cwd: this.role.repoRoot,
+			systemPrompt: [
+				"You are Symphony's independent reviewer running in a fresh session.",
+				"You have read-only tools. You never modify files.",
+				"Judge only from the task contract, plan, diff, report, and evidence you are given.",
+				"Finish with the required ```review JSON block.",
+			].join("\n"),
+		};
+	}
+
+	async run(manifest: string, options: { signal?: AbortSignal; taskId: string; taskFilePath?: string }): Promise<ReviewReport> {
 		const {
 			createAgentSession,
 			SessionManager,
@@ -93,17 +126,27 @@ export class SdkReviewerRunner implements ReviewerRunner {
 			DefaultResourceLoader,
 			getAgentDir,
 		} = await import("@earendil-works/pi-coding-agent");
+		const { readFileSync } = await import("node:fs");
 		const { Type } = await import("typebox");
 
+		const taskFilePath = options.taskFilePath;
 		const symTaskRead = defineTool({
 			name: "sym_task_read",
 			label: "Read Symphony task",
 			description: "Read the Symphony task markdown file for the reviewed task",
 			parameters: Type.Object({ taskId: Type.String() }),
-			execute: async (_id, params) => ({
-				content: [{ type: "text", text: manifest }],
-				details: {},
-			}),
+			execute: async (_id, params) => {
+				// Only the reviewed task is readable — never an arbitrary path.
+				let text = manifest;
+				if (taskFilePath && params.taskId === options.taskId) {
+					try {
+						text = readFileSync(taskFilePath, "utf8");
+					} catch {
+						// fall back to the manifest
+					}
+				}
+				return { content: [{ type: "text", text }], details: {} };
+			},
 		});
 
 		const loader = new DefaultResourceLoader({
@@ -124,15 +167,30 @@ export class SdkReviewerRunner implements ReviewerRunner {
 		});
 		await loader.reload();
 
+		const plan = this.buildSessionPlan();
 		const { session } = await createAgentSession({
 			resourceLoader: loader,
-			tools: ["read", "grep", "find", "ls"],
+			tools: plan.tools,
 			customTools: [symTaskRead],
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(plan.cwd),
 		});
 
+		// Apply reviewer role settings: thinking level and (when configured) model.
+		if (this.role.thinking && this.role.thinking !== "inherit") {
+			session.setThinkingLevel(this.role.thinking as Parameters<typeof session.setThinkingLevel>[0]);
+		}
+
 		let finalText = "";
+		let turns = 0;
+		let turnCapped = false;
 		const unsubscribe = session.subscribe((event) => {
+			if (event.type === "turn_end") {
+				turns += 1;
+				if (this.role.maxTurns > 0 && turns >= this.role.maxTurns) {
+					turnCapped = true;
+					void session.abort();
+				}
+			}
 			if (event.type === "message_end" && event.message.role === "assistant") {
 				const text = event.message.content
 					.filter((block): block is { type: "text"; text: string } => block.type === "text")
@@ -144,9 +202,21 @@ export class SdkReviewerRunner implements ReviewerRunner {
 		try {
 			if (options.signal?.aborted) throw new Error("review aborted before start");
 			await session.prompt(reviewPromptFor(manifest));
+		} catch (err) {
+			if (!turnCapped) throw err;
+			// Turn cap hit: report as changes_requested with an explicit note —
+			// a truncated review never approves anything.
 		} finally {
 			unsubscribe();
 			session.dispose();
+		}
+		if (turnCapped) {
+			return {
+				verdict: "changes_requested",
+				findings: [{ severity: "note", summary: `reviewer hit the turn cap (${this.role.maxTurns}); review incomplete` }],
+				summary: finalText.slice(0, 2000),
+				sessionId: session.sessionId,
+			};
 		}
 		return parseReviewOutput(finalText, session.sessionId);
 	}

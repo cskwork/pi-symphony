@@ -91,7 +91,15 @@ export function defaultConfig(projectName: string): SymphonyConfig {
 		},
 		checks: { verify: ["unit"], postIntegration: ["unit"] },
 		security: {
-			protectedPaths: [".env", ".env.*", ".git/**", ".symphony/runtime/**"],
+			// Symphony's own state is never writable by the model: tasks and
+			// evidence are workflow truth (block); config is human-owned (confirm).
+			protectedPaths: [
+				"**/.env",
+				"**/.env.*",
+				"**/.envrc",
+				"**/.git/**",
+				".symphony/**",
+			],
 			protectedPathPolicy: "confirm",
 		},
 		limits: { maxChildSessions: 1, maxStageRetries: 1 },
@@ -203,6 +211,20 @@ export function validateConfig(raw: unknown): { issues: ConfigIssue[]; config?: 
 			if (!cfg.commands[name]) {
 				issues.push({ path: `checks.${group}`, message: `unknown check "${name}" — define it under commands:` });
 			}
+		}
+		// Close the zero-check hole: a check set with no *required* command
+		// would let evidence-free Ready/Done through. At least one required
+		// check per set, and the set must not be empty.
+		if (names.length === 0) {
+			issues.push({
+				path: `checks.${group}`,
+				message: "check set must not be empty — removing all checks would allow evidence-free completion",
+			});
+		} else if (!names.some((name) => cfg.commands[name]?.required)) {
+			issues.push({
+				path: `checks.${group}`,
+				message: `at least one check in this set must be required:true (got none of: ${names.join(", ")})`,
+			});
 		}
 	}
 

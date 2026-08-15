@@ -40,13 +40,22 @@ function encodeTime(time: number): string {
 	return out;
 }
 
-/** Sanitize a free-text title into a filesystem-safe slug. */
-export function slugify(text: string): string {
-	return (
-		text
-			.toLowerCase()
-			.replace(/[^a-z0-9]+/g, "-")
-			.replace(/^-+|-+$/g, "")
-			.slice(0, 48) || "task"
-	);
+
+/** Task ids are the only path-forming input from models: strict format. */
+const TASK_ID_RE = /^[A-Z][A-Z0-9_-]*-\d+$/;
+
+export function isValidTaskId(taskId: string): boolean {
+	return TASK_ID_RE.test(taskId);
+}
+
+export class InvalidTaskIdError extends Error {
+	constructor(public taskId: string) {
+		super(`invalid task id "${taskId}" (expected e.g. DEV-014)`);
+		this.name = "InvalidTaskIdError";
+	}
+}
+
+/** Assert at every core entry point; prevents path traversal via task ids. */
+export function assertValidTaskId(taskId: string): void {
+	if (!isValidTaskId(taskId)) throw new InvalidTaskIdError(taskId);
 }

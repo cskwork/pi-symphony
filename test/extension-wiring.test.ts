@@ -170,7 +170,7 @@ describe("extension wiring", () => {
 			ctx,
 		)) as { block: boolean; reason: string } | undefined;
 		expect(blockedEnv?.block).toBe(true);
-		expect(blockedEnv?.reason).toMatch(/protected-path/);
+		expect(blockedEnv?.reason).toMatch(/protected/);
 
 		// destructive command: with hasUI=false the confirm resolves false → blocked
 		const blockedPush = (await guard(
