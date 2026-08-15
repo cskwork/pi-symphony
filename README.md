@@ -105,9 +105,13 @@ Tasks can declare validated dependencies (`task_done`, `stage_reached`, `check_p
 
 A supervisor owns a repository fingerprint exclusively (pid-locked; dead owners are reclaimed into a new epoch that invalidates stale reports). Startup runs a reconciliation gate over processes, leases, timers, workspaces, state, and event offsets before any dispatch. Mutating RPCs are idempotent (command ID + idempotency key + actor + typed payload; identical retries return the original outcome). Detachment contracts authorize exactly the stages/roles/tools/attempts/time approved — expiry, policy drift, or task drift stops at the next safe boundary. The event log guarantees watermark continuity between snapshots and live streams; timers fire typed commands exactly once across restarts and clock skew; protocol mismatches refuse mutation with a concrete upgrade path.
 
+## Integrations & observability (v0.8)
+
+Adapters declare their capabilities (read/write surfaces, auth source, rate limits, error taxonomy) before registration and only ever return normalized snapshots — remote changes to local-owned fields become explicit conflicts, and remote labels map to validated commands (never direct stage jumps). Outbound mutations are typed, approval-linked, and idempotent (one remote effect per key, receipts replayed after lost responses); push preflight refuses divergence and never authorizes force. CI evidence gates on the expected head SHA with unambiguous context mapping; local checks and remote CI stay distinct. Export is off by default (operational metadata only), usage distinguishes provider-reported/estimated/unavailable, and every credential-bearing surface is redacted.
+
 ## Status
 
-- **v0.7** — + supervisor authority, reconciliation, idempotent RPC, detachment contracts, durable event log, timers.
-- v0.8 adds repository integrations, CI evidence, and observability.
+- **v0.8** — + adapter contracts, conflict-safe sync, idempotent outbound ops, CI evidence gating, redacted observability, audit correlation.
+- v0.9 hardens the release candidate; v1.0 is GA.
 
 See `docs/` for version reports and review records.
