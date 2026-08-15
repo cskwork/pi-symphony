@@ -93,9 +93,13 @@ Repositories can define a validated stage graph in `config.yaml` (schema v2): st
 
 `/sym roles` shows the active topology (Quick / Standard / Deep); `/sym delegate <role>` launches a read-only fresh session (scout, architect, security reviewer, QA analyst, reviewer) with an immutable manifest — declared inputs, tools, turn/wall-clock budgets, and explicitly *omitted* scope. Results return through a durable handoff ledger: validated envelopes referencing artifacts by digest (never inline copies), idempotent submission, acceptance gated on role/task/stage/attempt/topology match, and append-only audit events. Delegated roles never get write tools; the implementer stays the single writer.
 
+## Worktrees & delivery (v0.5)
+
+Managed worktrees give delegated roles isolated write surfaces: allocation happens only after a preview, paths are canonicalized outside the repository, and branch names are deterministic and collision-safe. Write ownership uses **fenced leases** — atomic compare-and-swap with monotonically increasing fencing tokens, so a stale owner's report can never be accepted after a transfer, and a moved head invalidates evidence before any gate trusts it. Delivery is typed, previewed, and audited: non-mutating preflight lists each blocker separately; a mutation that lands but fails checks yields `IntegratedUnverified` — no auto-reset, explicit operator disposition required; manual integration must prove the result contains the approved task head (squash equivalence needs an explicit acknowledgment). Git mutations in the product are limited to five typed command kinds — the read-only inspection allowlist covers everything else.
+
 ## Status
 
-- **v0.4** — + delegated read-only role sessions, topology presets, durable handoff protocol.
-- v0.5 adds git worktrees and controlled delivery.
+- **v0.5** — + managed worktrees, fenced write leases, typed controlled delivery.
+- v0.6 adds multi-task scheduling and bounded parallelism.
 
 See `docs/` for version reports and review records.
