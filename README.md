@@ -101,9 +101,13 @@ Managed worktrees give delegated roles isolated write surfaces: allocation happe
 
 Tasks can declare validated dependencies (`task_done`, `stage_reached`, `check_passed`) evaluated against durable state. The scheduler is deterministic: selection is a pure function of the snapshot (priority → aging → age tie-breaks), with a starvation bound so eligible work never waits forever. Dispatch is idempotent (intent → ack → reconcile → resolve); admission claims all required capacity or none; exclusive resources have exactly one owner; retries are classified (transient/deterministic/policy/user/unknown) with circuit breakers that halt retry storms.
 
+## Detached runtime & RPC (v0.7)
+
+A supervisor owns a repository fingerprint exclusively (pid-locked; dead owners are reclaimed into a new epoch that invalidates stale reports). Startup runs a reconciliation gate over processes, leases, timers, workspaces, state, and event offsets before any dispatch. Mutating RPCs are idempotent (command ID + idempotency key + actor + typed payload; identical retries return the original outcome). Detachment contracts authorize exactly the stages/roles/tools/attempts/time approved — expiry, policy drift, or task drift stops at the next safe boundary. The event log guarantees watermark continuity between snapshots and live streams; timers fire typed commands exactly once across restarts and clock skew; protocol mismatches refuse mutation with a concrete upgrade path.
+
 ## Status
 
-- **v0.6** — + dependency DAG, deterministic scheduler, idempotent dispatch, capacity pools, retry taxonomy.
-- v0.7 adds detached runtime, resumability, and headless RPC.
+- **v0.7** — + supervisor authority, reconciliation, idempotent RPC, detachment contracts, durable event log, timers.
+- v0.8 adds repository integrations, CI evidence, and observability.
 
 See `docs/` for version reports and review records.
