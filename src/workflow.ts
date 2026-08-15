@@ -98,6 +98,8 @@ export interface EvidenceBundle {
 	hasReport: (section: "plan" | "implementation" | "review") => boolean;
 	/** Provenance of the latest review report, when one exists. */
 	reviewProvenance?: ReportOrigin;
+	/** Verdict of the latest review report ("approved" unblocks; anything else blocks). */
+	reviewVerdict?: "approved" | "changes_requested";
 	planApproved: boolean;
 	/** Latest run per required check name. */
 	checks: Map<string, CheckRunEvidence>;
@@ -135,6 +137,16 @@ export function evaluateGate(
 				reason: origin === undefined
 					? "verify requires an independent review (fresh session or recorded human approval)"
 					: "review submitted by the implementer session cannot certify the task; an independent fresh-session review is required",
+			};
+		}
+		// Independent AND approving: a changes_requested verdict is failing
+		// evidence for the gate — the engine must not advance on it.
+		if (origin === "fresh-reviewer" && evidence.reviewVerdict !== "approved") {
+			return {
+				ok: false,
+				reason: evidence.reviewVerdict === undefined
+					? "the review report carries no verdict"
+					: "the review verdict is changes_requested — address the findings and re-review",
 			};
 		}
 	}

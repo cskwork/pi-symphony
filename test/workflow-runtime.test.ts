@@ -21,6 +21,7 @@ describe("graph-driven runtime (V03 compilation)", () => {
 		const evidence = {
 			hasReport: () => true,
 			reviewProvenance: "model" as const,
+			reviewVerdict: "approved" as const,
 			planApproved: true,
 			checks: new Map(),
 			checksRevision: null,

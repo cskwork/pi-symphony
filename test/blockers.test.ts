@@ -79,7 +79,7 @@ describe("blocker 1: blocked → X carries the target stage's contract", () => {
 		core.transition(taskId, "plan");
 		core.submitReport({ taskId, section: "plan", summary: "s", details: {} });
 		core.submitReport({ taskId, section: "implementation", summary: "s", details: {} });
-		core.submitReport({ taskId, section: "review", summary: "A", details: {}, origin: "fresh-reviewer" });
+		core.submitReport({ taskId, section: "review", summary: "A", details: { verdict: "approved" }, origin: "fresh-reviewer" });
 		core.transition(taskId, "verify");
 		core.transition(taskId, "blocked");
 		const moved = core.transition(taskId, "ready");
@@ -100,12 +100,23 @@ describe("blocker 2: review provenance is an engine invariant", () => {
 		if (!moved.ok) expect(moved.error).toMatch(/implementer session|independent review/);
 	});
 
+	it("a changes_requested fresh-reviewer verdict blocks verify (engine-level, not TUI-only)", async () => {
+		const taskId = createTask();
+		core.transition(taskId, "plan");
+		core.submitReport({ taskId, section: "plan", summary: "s", details: {} });
+		core.submitReport({ taskId, section: "implementation", summary: "s", details: {} });
+		core.submitReport({ taskId, section: "review", summary: "CHANGES_REQUESTED — fix the race", details: { verdict: "changes_requested" }, origin: "fresh-reviewer", });
+		const moved = core.transition(taskId, "verify");
+		expect(moved.ok).toBe(false);
+		if (!moved.ok) expect(moved.error).toMatch(/changes_requested/);
+	});
+
 	it("a fresh-reviewer review satisfies it; a manual one does too", async () => {
 		const taskId = createTask();
 		core.transition(taskId, "plan");
 		core.submitReport({ taskId, section: "plan", summary: "s", details: {} });
 		core.submitReport({ taskId, section: "implementation", summary: "s", details: {} });
-		core.submitReport({ taskId, section: "review", summary: "APPROVED", details: {}, origin: "fresh-reviewer" });
+		core.submitReport({ taskId, section: "review", summary: "APPROVED", details: { verdict: "approved" }, origin: "fresh-reviewer", });
 		expect(core.transition(taskId, "verify").ok).toBe(true);
 
 		const taskId2 = createTask();
@@ -154,7 +165,7 @@ describe("major fixes from the adversarial review", () => {
 		core.transition(taskId, "plan");
 		core.submitReport({ taskId, section: "plan", summary: "s", details: {} });
 		core.submitReport({ taskId, section: "implementation", summary: "s", details: {} });
-		core.submitReport({ taskId, section: "review", summary: "A", details: {}, origin: "fresh-reviewer" });
+		core.submitReport({ taskId, section: "review", summary: "A", details: { verdict: "approved" }, origin: "fresh-reviewer" });
 		core.transition(taskId, "verify");
 		const ready = await core.advanceToReady(taskId);
 		expect(ready.ok).toBe(true);
@@ -177,7 +188,7 @@ describe("major fixes from the adversarial review", () => {
 		core.transition(taskId, "plan");
 		core.submitReport({ taskId, section: "plan", summary: "s", details: {} });
 		core.submitReport({ taskId, section: "implementation", summary: "s", details: {} });
-		core.submitReport({ taskId, section: "review", summary: "A", details: {}, origin: "fresh-reviewer" });
+		core.submitReport({ taskId, section: "review", summary: "A", details: { verdict: "approved" }, origin: "fresh-reviewer" });
 		core.transition(taskId, "verify");
 		await core.runCheckSet(taskId, "verify");
 		// delete artifact, then attempt Ready without rerunning checks
@@ -237,7 +248,7 @@ describe("major fixes from the adversarial review", () => {
 			plainCore.transition(id, "plan");
 			plainCore.submitReport({ taskId: id, section: "plan", summary: "s", details: {} });
 			plainCore.submitReport({ taskId: id, section: "implementation", summary: "s", details: {} });
-			plainCore.submitReport({ taskId: id, section: "review", summary: "A", details: {}, origin: "fresh-reviewer" });
+			plainCore.submitReport({ taskId: id, section: "review", summary: "A", details: { verdict: "approved" }, origin: "fresh-reviewer" });
 			plainCore.transition(id, "verify");
 			const ready = await plainCore.advanceToReady(id);
 			expect(ready.ok).toBe(true);

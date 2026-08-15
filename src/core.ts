@@ -431,9 +431,11 @@ export class SymphonyCore {
 	private evidenceFor(id: string, risks: string[], revision: string | null): EvidenceBundle {
 		const checks = this.validateEvidenceArtifacts(id);
 		const planRevision = this.planRevisionOf(id);
+		const reviewReport = this.reportFor(id, "review");
 		return {
 			hasReport: (section) => this.hasReport(id, section),
-			reviewProvenance: this.reportFor(id, "review")?.origin,
+			reviewProvenance: reviewReport?.origin,
+			reviewVerdict: reviewReport ? readReviewVerdict(reviewReport.details) : undefined,
 			planApproved: [...this.approvals.values()].some(
 				(a) =>
 					a.taskId === id &&
@@ -1418,4 +1420,11 @@ function yamlScalar(value: string): string {
 	if (/^(?:true|false|null|yes|no|on|off|~)$/i.test(value)) return JSON.stringify(value);
 	if (/^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(value)) return JSON.stringify(value);
 	return /^[A-Za-z0-9_./@-]+$/.test(value) ? value : JSON.stringify(value);
+}
+
+
+/** Extract the verdict from a review report's details (tolerant of shape). */
+function readReviewVerdict(details: Record<string, unknown>): "approved" | "changes_requested" | undefined {
+	const verdict = details["verdict"];
+	return verdict === "approved" || verdict === "changes_requested" ? verdict : undefined;
 }

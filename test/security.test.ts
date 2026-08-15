@@ -54,7 +54,7 @@ describe("E2: evidence tampering", () => {
 		core.transition(taskId, "plan");
 		core.submitReport({ taskId, section: "plan", summary: "s", details: {} });
 		core.submitReport({ taskId, section: "implementation", summary: "s", details: {} });
-		core.submitReport({ taskId, section: "review", summary: "A", details: {}, origin: "fresh-reviewer" });
+		core.submitReport({ taskId, section: "review", summary: "A", details: { verdict: "approved" }, origin: "fresh-reviewer" });
 		core.transition(taskId, "verify");
 		// make the check FAIL so a pass would be a forgery
 		const failing = new SymphonyCore({
@@ -119,7 +119,7 @@ describe("config integrity (R2b)", () => {
 		core.transition(taskId, "plan");
 		core.submitReport({ taskId, section: "plan", summary: "s", details: {} });
 		core.submitReport({ taskId, section: "implementation", summary: "s", details: {} });
-		core.submitReport({ taskId, section: "review", summary: "A", details: {}, origin: "fresh-reviewer" });
+		core.submitReport({ taskId, section: "review", summary: "A", details: { verdict: "approved" }, origin: "fresh-reviewer" });
 		core.transition(taskId, "verify");
 		core.setRunState(taskId, "running"); // pins the current config hash
 		// change the config on disk and reload
@@ -138,7 +138,7 @@ describe("E3: check-gated transitions refuse synchronous staleness", () => {
 		core.transition(taskId, "plan");
 		core.submitReport({ taskId, section: "plan", summary: "s", details: {} });
 		core.submitReport({ taskId, section: "implementation", summary: "s", details: {} });
-		core.submitReport({ taskId, section: "review", summary: "A", details: {}, origin: "fresh-reviewer" });
+		core.submitReport({ taskId, section: "review", summary: "A", details: { verdict: "approved" }, origin: "fresh-reviewer" });
 		core.transition(taskId, "verify");
 		const moved = core.transition(taskId, "ready");
 		expect(moved.ok).toBe(false);
@@ -152,7 +152,7 @@ describe("O1: symbolic integration revisions", () => {
 		core.transition(taskId, "plan");
 		core.submitReport({ taskId, section: "plan", summary: "s", details: {} });
 		core.submitReport({ taskId, section: "implementation", summary: "s", details: {} });
-		core.submitReport({ taskId, section: "review", summary: "A", details: {}, origin: "fresh-reviewer" });
+		core.submitReport({ taskId, section: "review", summary: "A", details: { verdict: "approved" }, origin: "fresh-reviewer" });
 		core.transition(taskId, "verify");
 		const ready = await core.advanceToReady(taskId);
 		expect(ready.ok).toBe(true);
