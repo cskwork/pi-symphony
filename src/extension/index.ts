@@ -21,6 +21,7 @@ import { buildBrief, configIssuesText, doctorLines, nextStepLine, planBrief, tas
 import { classifyWrite, escapesCwd, findDestructiveCommand, pathRelativeTo, realpathOrSelf, redirectTargets, resolveToolPath } from "./guard.ts";
 import { WebControlPlane } from "../web/server.ts";
 import { SkillCatalog, activeCapabilities } from "../skills.ts";
+import { DelegatedRoleRunner, HandoffLedger, RoleSessionRegistry, TOPOLOGIES, artifactDigest, type RoleManifest } from "../roles.ts";
 
 const SUBCOMMANDS = [
 	"init",
@@ -44,6 +45,9 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 	let sessionId = "unknown";
 	let webPlane: WebControlPlane | undefined;
 	let skillCatalog: SkillCatalog | undefined;
+	const roleRegistry = new RoleSessionRegistry();
+	const handoffs = new HandoffLedger();
+	let topology: keyof typeof TOPOLOGIES = "standard";
 
 	function skillsFor(ctx: ExtensionContext): SkillCatalog {
 		if (!skillCatalog) {
@@ -223,6 +227,12 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 						return await cmdCancel(ctx, c);
 					case "web":
 						return await cmdWeb(ctx, c, rest[0]);
+					case "roles":
+						return cmdRoles(ctx);
+					case "delegate":
+						return await cmdDelegate(ctx, c, rest[0]);
+					case "handoffs":
+						return cmdHandoffs(ctx);
 					default:
 						ctx.ui.notify(`Symphony: unknown subcommand "${sub}". Try /sym for the overlay.`, "warning");
 				}
@@ -612,6 +622,92 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		await cmdContinue(ctx, c);
+	}
+
+	function cmdRoles(ctx: ExtensionContext): void {
+		const topo = TOPOLOGIES[topology];
+		const lines = [
+			`Topology: ${topo.id} (max ${topo.maxConcurrent} concurrent delegated sessions)`,
+			...topo.roles.map((r) => `  ${r.role}: ≤${r.limits.maxTurns} turns, ${Math.round(r.limits.wallClockMs / 60000)}min, inputs: ${r.inputs.join(", ")}`),
+			"",
+			"Sessions:",
+			...(roleRegistry.all().length === 0
+				? ["  (none — /sym delegate <role> launches one)"]
+				: roleRegistry.all().map((s) => `  ${s.id.slice(0, 12)} ${s.manifest.role} ${s.lifecycle}${s.error ? ` — ${s.error}` : ""}`)),
+			"Single writer: delegated roles are read-only; the implementer owns the checkout.",
+		];
+		ctx.ui.notify(lines.join("\n"), "info");
+	}
+
+	function cmdHandoffs(ctx: ExtensionContext): void {
+		const all = handoffs.all();
+		ctx.ui.notify(
+			all.length === 0
+				? "No handoffs."
+				: ["Handoffs:", ...all.map((h) => `  ${h.id.slice(0, 16)} ${h.fromRole}→${h.toRole} ${h.state} (${h.taskId} ${h.stage})`)].join("\n"),
+			"info",
+		);
+	}
+
+	async function cmdDelegate(ctx: ExtensionContext, c: SymphonyCore, roleArg?: string): Promise<void> {
+		const topo = TOPOLOGIES[topology];
+		const role = topo.roles.find((r) => r.role === roleArg);
+		if (!role) {
+			return void ctx.ui.notify(`Unknown role "${roleArg}". Topology ${topo.id}: ${topo.roles.map((r) => r.role).join(", ")}`, "warning");
+		}
+		const activeTask = c.listTasks().find((t) => !["done", "cancelled"].includes(t.stage));
+		if (!activeTask) return void ctx.ui.notify("No active task to delegate for.", "warning");
+		const manifest: RoleManifest = {
+			role: role.role,
+			taskId: activeTask.id,
+			stage: activeTask.stage,
+			attemptId: `${activeTask.stage}-delegate`,
+			revision: activeTask.evidenceRevision ?? null,
+			configHash: (await import("../config.ts")).configHash(c.config),
+			inputs: role.inputs,
+			tools: ["read", "grep", "find", "ls"],
+			skills: [],
+			limits: role.limits,
+			omitted: ["implementer_transcript", "write_tools", "bash"],
+			createdAt: new Date().toISOString(),
+		};
+		const launched = roleRegistry.launch(manifest, { hardCap: 2, configCap: topo.maxConcurrent });
+		if (!launched.ok) return void ctx.ui.notify(launched.error, "warning");
+		const manifestForRunner = launched.session.manifest;
+		ctx.ui.notify(`Delegating ${role.role} for ${activeTask.id} (read-only, ≤${role.limits.maxTurns} turns)…`, "info");
+		try {
+			const manifestText = await c.buildReviewManifest(activeTask.id);
+			const context = manifestText.ok
+				? manifestText.value.manifest
+				: `Task ${activeTask.id}: ${activeTask.title} (${activeTask.stage})`;
+			const runner = new DelegatedRoleRunner(manifestForRunner);
+			const report = await runner.run(context);
+			roleRegistry.setLifecycle(launched.session.id, "completed");
+			const submitted = handoffs.submit({
+				idempotencyKey: `${manifest.taskId}:${manifest.role}:${manifest.attemptId}`,
+				fromRole: "implementer",
+				toRole: manifest.role,
+				taskId: manifest.taskId,
+				stage: manifest.stage,
+				attemptId: manifest.attemptId,
+				revision: manifest.revision,
+				configHash: manifest.configHash,
+				manifestId: launched.session.id,
+				artifacts: [{ kind: "role_report", ref: `.symphony/evidence/${manifest.taskId}/review/${manifest.role}-${launched.session.id}.md`, sha256: artifactDigest(report.summary) }],
+				payloadSummary: report.summary.slice(0, 500),
+			});
+			if (submitted.ok) {
+				handoffs.accept(submitted.handoff.id, { role: manifest.role, taskId: manifest.taskId, stage: manifest.stage, attemptId: manifest.attemptId, manifestId: launched.session.id }, "system");
+				handoffs.complete(submitted.handoff.id, manifest.role);
+			}
+			ctx.ui.notify(
+				[`Delegated ${role.role} completed (${report.turns} turns, session ${report.sessionId.slice(0, 8)}):`, report.summary.slice(0, 1200)].join("\n"),
+				"info",
+			);
+		} catch (err) {
+			roleRegistry.setLifecycle(launched.session.id, "failed", (err as Error).message);
+			ctx.ui.notify(`Delegated ${role.role} failed: ${(err as Error).message}`, "error");
+		}
 	}
 
 	async function cmdWeb(ctx: ExtensionContext, c: SymphonyCore, action?: string): Promise<void> {

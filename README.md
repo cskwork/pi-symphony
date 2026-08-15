@@ -89,9 +89,13 @@ pi -e ./src/extension/index.ts -p "/sym doctor"   # load smoke test
 
 Repositories can define a validated stage graph in `config.yaml` (schema v2): structured stages with typed data-only conditions (`task_kind`, `task_field`, `changed_paths`, `all/any/not`), declared inputs/outputs, approval and check gates, plus enforced invariants — no path to Done can bypass deterministic verification or completion evidence, and independent-review provenance is never optional. Skills live in `.symphony/skills/<name>/skill.yaml` with declared capabilities; the model sees catalog entries only (`sym_skills`) and loads full instructions on selection (`sym_skill_select`). Skills are hash-pinned; content drift requires re-approval, and a skill can never grant a capability that role/repository policy forbids.
 
+## Delegation & handoffs (v0.4)
+
+`/sym roles` shows the active topology (Quick / Standard / Deep); `/sym delegate <role>` launches a read-only fresh session (scout, architect, security reviewer, QA analyst, reviewer) with an immutable manifest — declared inputs, tools, turn/wall-clock budgets, and explicitly *omitted* scope. Results return through a durable handoff ledger: validated envelopes referencing artifacts by digest (never inline copies), idempotent submission, acceptance gated on role/task/stage/attempt/topology match, and append-only audit events. Delegated roles never get write tools; the implementer stays the single writer.
+
 ## Status
 
-- **v0.3** — + workflow customization, typed conditions, simulation, composable skills, v1→v2 config migration.
-- v0.4 adds delegation, role topology, and durable handoffs.
+- **v0.4** — + delegated read-only role sessions, topology presets, durable handoff protocol.
+- v0.5 adds git worktrees and controlled delivery.
 
 See `docs/` for version reports and review records.
