@@ -109,9 +109,10 @@ A supervisor owns a repository fingerprint exclusively (pid-locked; dead owners 
 
 Adapters declare their capabilities (read/write surfaces, auth source, rate limits, error taxonomy) before registration and only ever return normalized snapshots — remote changes to local-owned fields become explicit conflicts, and remote labels map to validated commands (never direct stage jumps). Outbound mutations are typed, approval-linked, and idempotent (one remote effect per key, receipts replayed after lost responses); push preflight refuses divergence and never authorizes force. CI evidence gates on the expected head SHA with unambiguous context mapping; local checks and remote CI stay distinct. Export is off by default (operational metadata only), usage distinguishes provider-reported/estimated/unavailable, and every credential-bearing surface is redacted.
 
-## Status
+## Status — 1.0.0 (GA)
 
-- **v0.8** — + adapter contracts, conflict-safe sync, idempotent outbound ops, CI evidence gating, redacted observability, audit correlation.
-- v0.9 hardens the release candidate; v1.0 is GA.
+Production-ready: every gate above is test-enforced (299 tests across 31 files, typecheck clean, real-pi smoke). See `CHANGELOG.md`, `docs/` (per-version reports, security model, threat model, troubleshooting).
+
+**Honest scope:** local-first, Pi-native, bounded, non-sandboxed, no automatic production deployment. Stability follows the published 1.x contract.
 
 See `docs/` for version reports and review records.

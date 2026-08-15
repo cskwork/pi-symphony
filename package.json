@@ -1,7 +1,7 @@
 {
   "name": "@cskwork/pi-symphony",
-  "version": "0.9.0",
-  "description": "Symphony for Pi \u2014 evidence-based software-development workflow extension: Plan \u2192 Build \u2192 Review \u2192 Verify \u2192 Ready \u2192 Done with durable evidence.",
+  "version": "1.0.0",
+  "description": "Symphony for Pi \u2014 production-ready evidence-based software-development workflow: Plan \u2192 Build \u2192 Review \u2192 Verify \u2192 Ready \u2192 Done with durable evidence, independent review, controlled delivery, delegation, scheduling, and a synchronized local web UI.",
   "type": "module",
   "keywords": [
     "pi-package",
