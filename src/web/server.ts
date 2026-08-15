@@ -93,7 +93,7 @@ export class WebControlPlane {
 				return this.serveStatic(path, res);
 			}
 			if (path === "/api/v1/health" && req.method === "GET") {
-				return this.json(res, 200, { ok: true, projectionVersion: this.bridge?.getProjectionVersion() ?? 0 });
+				return this.json(res, 200, { ok: true, projectionVersion: this.bridge?.getProjectionVersion() ?? 0, lastEventSequence: this.bridge?.lastBridgeSequence() ?? 0 });
 			}
 			// Everything else requires the session credential.
 			const auth = `Bearer ${this.token}`;
@@ -326,24 +326,32 @@ export class WebControlPlane {
 		});
 		const lastEventHeader = req.headers["last-event-id"] ?? url.searchParams.get("lastEventId");
 		const lastEventId = typeof lastEventHeader === "string" ? lastEventHeader : null;
-		const retained = bridge.retained();
 		if (lastEventId === null) {
-			res.write(`event: hello\ndata: ${JSON.stringify({ lastEventSequence: retained.length > 0 ? retained[retained.length - 1]!.sequence : 0 })}\n\n`);
+			res.write(`event: hello\ndata: ${JSON.stringify({ lastEventSequence: bridge.lastBridgeSequence() })}\n\n`);
 		} else {
-			const lastIdx = retained.findIndex((e) => e.eventId === lastEventId);
-			const lastSeq = lastIdx >= 0 ? retained[lastIdx]!.sequence : Number(lastEventId.split("-")[0] ?? 0);
-			const decision = replayWindow(retained, Number.isFinite(lastSeq) ? lastSeq : 0, Infinity);
+			// Last-Event-ID is "<bridgeSequence>-<eventId>" — globally ordered
+			// across all aggregates (per-task ledger sequences are not).
+			const byId = bridge.bridgeSequenceOf(lastEventId.split("-").slice(1).join("-") ?? "");
+			const parsedSeq = Number(lastEventId.split("-")[0]);
+			const lastSeq = byId ?? (Number.isFinite(parsedSeq) ? parsedSeq : -1);
+			if (lastSeq < 0) {
+				// Unrecognized id: force a fresh snapshot instead of guessing.
+				res.write(`event: ${SNAPSHOT_REQUIRED}\ndata: {}\n\n`);
+				res.end();
+				return;
+			}
+			const decision = replayWindow(bridge.retained(), lastSeq, Infinity);
 			if (decision.kind === "snapshot_required") {
 				res.write(`event: ${SNAPSHOT_REQUIRED}\ndata: {}\n\n`);
 				res.end();
 				return;
 			}
-			for (const event of decision.events) {
-				res.write(`id: ${event.sequence}-${event.eventId}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+			for (const entry of decision.events) {
+				res.write(`id: ${entry.bridgeSequence}-${entry.event.eventId}\nevent: ${entry.event.type}\ndata: ${JSON.stringify(entry.event)}\n\n`);
 			}
 		}
-		const unsubscribe = bridge.subscribe((event) => {
-			res.write(`id: ${event.sequence}-${event.eventId}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+		const unsubscribe = bridge.subscribe((entry) => {
+			res.write(`id: ${entry.bridgeSequence}-${entry.event.eventId}\nevent: ${entry.event.type}\ndata: ${JSON.stringify(entry.event)}\n\n`);
 		});
 		const heartbeat = setInterval(() => res.write(`: ping\n\n`), 15_000);
 		heartbeat.unref?.();
@@ -409,7 +417,7 @@ export class WebControlPlane {
 		renameSync(tmp, core.paths.config);
 		this.bridge?.publish({
 			eventId: `cfg-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`,
-			sequence: (this.bridge?.retained().slice(-1)[0]?.sequence ?? 0) + 1,
+			sequence: 0, // bridge assigns its own global ordering
 			type: "config.applied",
 			aggregateId: "config",
 			aggregateRevision: 0,

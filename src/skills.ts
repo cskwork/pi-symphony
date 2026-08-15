@@ -5,7 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 // ---------------------------------------------------------------------------
@@ -180,6 +180,12 @@ export class SkillCatalog {
 					continue;
 				}
 				const entryPath = join(skillDir, result.manifest.entry);
+				// Containment: the entry must stay inside the skill directory —
+				// a manifest must never widen read access beyond its own package.
+				if (!isContainedIn(entryPath, skillDir)) {
+					this.issues.push({ message: `${entry.name}: entry "${result.manifest.entry}" escapes the skill directory` });
+					continue;
+				}
 				if (!existsSync(entryPath)) {
 					this.issues.push({ message: `${entry.name}: entry file "${result.manifest.entry}" not found` });
 					continue;
@@ -339,4 +345,12 @@ export function runFixture(fixture: SkillFixture, body: string): FixtureResult {
 		failedCheckpoints,
 		forbiddenHits,
 	};
+}
+
+
+/** True when `candidate` resolves inside `base` (no traversal escapes). */
+function isContainedIn(candidate: string, base: string): boolean {
+	const resolved = resolve(candidate);
+	const root = resolve(base);
+	return resolved === root || resolved.startsWith(root + sep);
 }

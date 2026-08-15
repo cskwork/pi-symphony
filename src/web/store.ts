@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, watchFile } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SymphonyCore } from "../core.ts";
 import type { SymphonyEvent, TaskStage } from "../types.ts";
@@ -8,18 +8,28 @@ import {
 	type TaskViewModel,
 } from "./protocol.ts";
 
+/** Ring entry: the bridge's own global sequence + the domain event. */
+export interface BridgeEvent {
+	/** Global, monotonic, strictly ordered across ALL aggregates. */
+	bridgeSequence: number;
+	event: SymphonyEvent;
+}
+
 /**
  * Event store + projection bridge between SymphonyCore and the web client.
  *
- * Tails the per-task JSONL ledgers (append-only, multi-process safe) into an
- * ordered ring buffer, and rebuilds immutable snapshot view models from the
- * same projections the TUI uses (V02-SYNC-001).
+ * Tails the per-task JSONL ledgers into an ordered ring with its OWN global
+ * sequence (per-aggregate ledger sequences are not comparable across tasks —
+ * using them for Last-Event-ID replay drops or duplicates events). Emission
+ * is idempotent by eventId, so ledger torn-tail truncation and re-append
+ * never produces silent gaps or duplicates.
  */
 export class EventBridge {
-	private ring: SymphonyEvent[] = [];
-	private subscribers = new Set<(event: SymphonyEvent) => void>();
-	private lastLineCounts = new Map<string, number>();
+	private ring: BridgeEvent[] = [];
+	private emittedIds = new Set<string>();
+	private subscribers = new Set<(entry: BridgeEvent) => void>();
 	private timer?: NodeJS.Timeout;
+	private nextBridgeSequence = 1;
 	private projectionVersion = 1;
 
 	constructor(
@@ -29,6 +39,7 @@ export class EventBridge {
 
 	start(pollMs = 200): void {
 		if (this.timer) return;
+		this.poll(); // ingest existing history immediately (bounded by retention)
 		this.timer = setInterval(() => this.poll(), pollMs);
 		this.timer.unref?.();
 	}
@@ -38,12 +49,11 @@ export class EventBridge {
 		this.timer = undefined;
 	}
 
-	/** All retained events (bounded). */
-	retained(): SymphonyEvent[] {
+	retained(): BridgeEvent[] {
 		return this.ring;
 	}
 
-	subscribe(listener: (event: SymphonyEvent) => void): () => void {
+	subscribe(listener: (entry: BridgeEvent) => void): () => void {
 		this.subscribers.add(listener);
 		return () => this.subscribers.delete(listener);
 	}
@@ -57,47 +67,67 @@ export class EventBridge {
 		return this.projectionVersion;
 	}
 
+	/** Global (bridge) sequence of the most recent retained entry. */
+	lastBridgeSequence(): number {
+		return this.ring.length > 0 ? this.ring[this.ring.length - 1]!.bridgeSequence : 0;
+	}
+
+	/** Bridge sequence for a given SSE id ("<bridgeSeq>-<eventId>"). */
+	bridgeSequenceOf(eventId: string): number | undefined {
+		return this.ring.find((entry) => entry.event.eventId === eventId)?.bridgeSequence;
+	}
+
 	private poll(): void {
 		if (!existsSync(this.eventsDir)) return;
 		for (const file of readdirSync(this.eventsDir)) {
-			if (!file.endsWith(".jsonl")) continue;
-			const path = join(this.eventsDir, file);
-			let lines: string[];
+			if (!file.endsWith(".jsonl") || file.startsWith("_")) continue;
+			this.pollFile(join(this.eventsDir, file));
+		}
+	}
+
+	/**
+	 * Idempotent file tailing: parse every VALID event in the file and emit
+	 * exactly the ones we have not emitted yet (by eventId). This is robust
+	 * to torn-tail truncation (earlier valid ids are unchanged, the torn
+	 * line is skipped until completed) and to file rewrites that preserve
+	 * valid prefixes.
+	 */
+	private pollFile(path: string): void {
+		let text: string;
+		try {
+			text = readFileSync(path, "utf8");
+		} catch {
+			return;
+		}
+		for (const line of text.split("\n")) {
+			const trimmed = line.trim();
+			if (!trimmed) continue;
+			let event: SymphonyEvent;
 			try {
-				lines = readFileSync(path, "utf8").split("\n");
+				event = JSON.parse(trimmed) as SymphonyEvent;
 			} catch {
-				continue;
+				continue; // torn tail: skip until the write completes
 			}
-			const seen = this.lastLineCounts.get(path) ?? 0;
-			const complete = lines.length > 0 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
-			if (complete <= seen) continue;
-			// On first sight of a file, only stream new appends after startup;
-			// history is covered by the snapshot.
-			const start = seen === 0 ? Math.max(0, complete - 1) : seen;
-			for (let i = start; i < complete; i++) {
-				const line = lines[i]!;
-				try {
-					const event = JSON.parse(line) as SymphonyEvent;
-					if (event.eventId && event.type) this.append(event);
-				} catch {
-					// torn tail: skip until the write completes
-				}
-			}
-			this.lastLineCounts.set(path, complete);
+			if (!event.eventId || !event.type) continue;
+			if (!this.emittedIds.has(event.eventId)) this.append(event);
 		}
 	}
 
 	private append(event: SymphonyEvent): void {
-		if (this.ring.length > 0) {
-			const last = this.ring[this.ring.length - 1]!;
-			if (last.eventId === event.eventId) return; // dedup across poll double-reads
+		this.emittedIds.add(event.eventId);
+		if (this.emittedIds.size > MAX_SSE_RETAINED_EVENTS * 2) {
+			// bounded bookkeeping: drop the oldest ids no longer in the ring
+			const keep = new Set(this.ring.slice(-MAX_SSE_RETAINED_EVENTS).map((e) => e.event.eventId));
+			keep.add(event.eventId);
+			this.emittedIds = keep;
 		}
-		this.ring.push(event);
+		const entry: BridgeEvent = { bridgeSequence: this.nextBridgeSequence++, event };
+		this.ring.push(entry);
 		if (this.ring.length > MAX_SSE_RETAINED_EVENTS) {
 			this.ring.splice(0, this.ring.length - MAX_SSE_RETAINED_EVENTS);
 		}
 		this.projectionVersion += 1;
-		for (const subscriber of this.subscribers) subscriber(event);
+		for (const subscriber of this.subscribers) subscriber(entry);
 	}
 }
 
@@ -125,7 +155,6 @@ export function buildSnapshot(core: SymphonyCore, bridge: EventBridge, repositor
 				: undefined,
 		};
 	});
-	const retained = bridge.retained();
 	return {
 		projectionVersion: bridge.getProjectionVersion(),
 		repositoryId,
@@ -133,7 +162,7 @@ export function buildSnapshot(core: SymphonyCore, bridge: EventBridge, repositor
 		configHash: "", // filled by server via configHash(core.config)
 		configValid: core.configIssues.length === 0,
 		tasks,
-		lastEventSequence: retained.length > 0 ? retained[retained.length - 1]!.sequence : 0,
+		lastEventSequence: bridge.lastBridgeSequence(),
 		serverStartedAt: new Date().toISOString(),
 	};
 }

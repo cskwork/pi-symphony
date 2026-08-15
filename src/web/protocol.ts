@@ -108,13 +108,15 @@ export const SNAPSHOT_REQUIRED = "snapshot_required";
  * Replay policy: retained window is bounded. If Last-Event-ID is older than
  * the window, the client must take a fresh snapshot instead.
  */
-export function replayWindow<T extends { sequence: number }>(events: T[], lastEventIdSequence: number, windowSize: number):
+export function replayWindow<T extends { bridgeSequence?: number; sequence?: number }>(events: T[], lastEventIdSequence: number, windowSize: number):
 	| { kind: "replay"; events: T[] }
 	| { kind: "snapshot_required" } {
+	// Bridge entries carry bridgeSequence; raw ledger events carry sequence.
+	const seqOf = (e: T) => (e as { bridgeSequence?: number }).bridgeSequence ?? (e as { sequence?: number }).sequence ?? 0;
 	if (events.length === 0) return { kind: "replay", events: [] };
-	const oldest = events[0]!.sequence;
+	const oldest = seqOf(events[0]!);
 	if (lastEventIdSequence < oldest - 1) return { kind: "snapshot_required" };
-	return { kind: "replay", events: events.filter((e) => e.sequence > lastEventIdSequence) };
+	return { kind: "replay", events: events.filter((e) => seqOf(e) > lastEventIdSequence) };
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync, copyFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { monotonicId } from "./ids.ts";
 
 export interface MigrationPreview {
@@ -79,7 +80,7 @@ export function applyMigration(configPath: string, preview: MigrationPreview): {
 	const backupPath = `${configPath}.v1-backup-${monotonicId()}`;
 	copyFileSync(configPath, backupPath);
 	const tmp = `${configPath}.tmp`;
-	mkdirSync(new URL(".", `file://${configPath}`).pathname, { recursive: true });
+	mkdirSync(join(configPath, ".."), { recursive: true });
 	writeFileSync(tmp, preview.nextYaml, "utf8");
 	renameSync(tmp, configPath);
 	return { ok: true, backupPath };

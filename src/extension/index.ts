@@ -684,7 +684,7 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 			const report = await runner.run(context);
 			roleRegistry.setLifecycle(launched.session.id, "completed");
 			const submitted = handoffs.submit({
-				idempotencyKey: `${manifest.taskId}:${manifest.role}:${manifest.attemptId}`,
+				idempotencyKey: `${manifest.taskId}:${manifest.role}:${manifest.attemptId}:${launched.session.id}`,
 				fromRole: "implementer",
 				toRole: manifest.role,
 				taskId: manifest.taskId,

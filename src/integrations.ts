@@ -123,16 +123,27 @@ export interface OutboundOperation {
 
 export class OutboundQueue {
 	private executed = new Map<string, { receipt: Record<string, unknown>; at: string }>();
+	/** In-flight executions, reserved synchronously so concurrent callers with
+	 * the same key share one transport call (exactly one remote effect). */
+	private inflight = new Map<string, Promise<{ ok: true; receipt: Record<string, unknown>; replayed: boolean } | { ok: false; error: string }>>();
 
 	/** Executes each key exactly once; lost-response retries replay the receipt. */
 	execute(operation: OutboundOperation, transport: (op: OutboundOperation) => Promise<Record<string, unknown>> | Record<string, unknown>): Promise<{ ok: true; receipt: Record<string, unknown>; replayed: boolean } | { ok: false; error: string }> {
-		return (async () => {
-			const prior = this.executed.get(operation.idempotencyKey);
-			if (prior) return { ok: true, receipt: prior.receipt, replayed: true };
-			const receipt = await transport(operation);
-			this.executed.set(operation.idempotencyKey, { receipt, at: new Date().toISOString() });
-			return { ok: true, receipt, replayed: false };
+		const prior = this.executed.get(operation.idempotencyKey);
+		if (prior) return Promise.resolve({ ok: true, receipt: prior.receipt, replayed: true });
+		const pending = this.inflight.get(operation.idempotencyKey);
+		if (pending) return pending;
+		const execution = (async () => {
+			try {
+				const receipt = await transport(operation);
+				this.executed.set(operation.idempotencyKey, { receipt, at: new Date().toISOString() });
+				return { ok: true as const, receipt, replayed: false };
+			} finally {
+				this.inflight.delete(operation.idempotencyKey);
+			}
 		})();
+		this.inflight.set(operation.idempotencyKey, execution);
+		return execution;
 	}
 
 	receipts(): Array<{ key: string; receipt: Record<string, unknown>; at: string }> {

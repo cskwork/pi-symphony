@@ -3,7 +3,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { monotonicId } from "./ids.ts";
 
@@ -25,27 +25,81 @@ export class SupervisorAuthority {
 	constructor(private lockFile: string, private pid: number) {}
 
 	/**
-	 * Exactly one authority per repository fingerprint (V07-SUP-001): the
-	 * lock records the owner pid; a live foreign owner refuses; a dead owner
-	 * is reclaimed with a new epoch (invalidating stale reports, V07-RUN-002).
+	 * Exactly one authority per repository fingerprint (V07-SUP-001).
+	 *
+	 * The claim uses mkdir() — the one truly atomic filesystem primitive —
+	 * so concurrent startups yield exactly one winner: the loser sees EEXIST,
+	 * reads the record, and either refuses (live owner) or takes over via an
+	 * atomic rename of the lock directory to a tombstone before retrying.
+	 * Dead-owner takeover bumps the epoch, invalidating stale reports
+	 * (V07-RUN-002).
 	 */
 	acquire(repositoryFingerprint: string): { ok: true; epoch: SupervisorEpoch; reclaimed: boolean } | { ok: false; error: string } {
-		const record = this.readLock();
-		if (record && record.pid !== this.pid && this.isAlive(record.pid)) {
-			return { ok: false, error: `another supervisor (pid ${record.pid}) owns this repository` };
-		}
-		const reclaimed = record !== undefined;
-		const epoch: SupervisorEpoch = {
-			epoch: (record?.epoch ?? 0) + 1,
-			authorityToken: randomBytes(16).toString("hex"),
-			acquiredAt: new Date().toISOString(),
-		};
+		const lockDir = `${this.lockFile}.lock`;
+		const recordPath = join(lockDir, "authority.json");
 		mkdirSync(join(this.lockFile, ".."), { recursive: true });
-		const tmp = `${this.lockFile}.tmp`;
-		writeFileSync(tmp, JSON.stringify({ ...epoch, pid: this.pid, fingerprint: repositoryFingerprint }, null, "\t"), "utf8");
-		renameSync(tmp, this.lockFile);
-		this.epoch = epoch;
-		return { ok: true, epoch, reclaimed };
+		for (let attempt = 0; attempt < 3; attempt++) {
+			try {
+				mkdirSync(lockDir); // atomic claim: fails with EEXIST if taken
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+				const record = this.readRecord(recordPath);
+				if (record && record.pid !== this.pid && this.isAlive(record.pid)) {
+					return { ok: false, error: `another supervisor (pid ${record.pid}) owns this repository` };
+				}
+				// dead or unreadable owner: tombstone the directory atomically,
+				// then retry — only one reclaimer's rename succeeds
+				const tombstone = `${lockDir}.dead-${monotonicId()}`;
+				try {
+					renameSync(lockDir, tombstone);
+					const dead = this.readRecord(join(tombstone, "authority.json"));
+					const epoch: SupervisorEpoch = {
+						epoch: (dead?.epoch ?? 0) + 1,
+						authorityToken: randomBytes(16).toString("hex"),
+						acquiredAt: new Date().toISOString(),
+					};
+					mkdirSync(lockDir, { recursive: true });
+					writeFileSync(join(lockDir, "authority.json"), JSON.stringify({ ...epoch, pid: this.pid, fingerprint: repositoryFingerprint }, null, "\t"), "utf8");
+					this.epoch = epoch;
+					return { ok: true, epoch, reclaimed: true };
+				} catch (renameErr) {
+					if ((renameErr as NodeJS.ErrnoException).code !== "ENOENT") throw renameErr;
+					continue; // someone else tombstoned it first — retry the claim
+				}
+			}
+			// we created the directory: fresh claim (epoch continues from any tombstone)
+			const dead = this.readLatestTombstone(`${this.lockFile}.lock.dead-`);
+			const epoch: SupervisorEpoch = {
+				epoch: (dead?.epoch ?? 0) + 1,
+				authorityToken: randomBytes(16).toString("hex"),
+				acquiredAt: new Date().toISOString(),
+			};
+			writeFileSync(join(lockDir, "authority.json"), JSON.stringify({ ...epoch, pid: this.pid, fingerprint: repositoryFingerprint }, null, "\t"), "utf8");
+			this.epoch = epoch;
+			return { ok: true, epoch, reclaimed: dead !== undefined };
+		}
+		return { ok: false, error: "could not claim supervisor authority after takeover races" };
+	}
+
+	private readRecord(path: string): { epoch: number; pid: number } | undefined {
+		try {
+			return JSON.parse(readFileSync(path, "utf8")) as { epoch: number; pid: number };
+		} catch {
+			return undefined;
+		}
+	}
+
+	private readLatestTombstone(prefix: string): { epoch: number; pid: number } | undefined {
+		try {
+			const parent = join(this.lockFile, "..");
+			const candidates = readdirSync(parent)
+				.filter((f) => f.startsWith(prefix.split("/").pop()!))
+				.sort();
+			const latest = candidates[candidates.length - 1];
+			return latest ? this.readRecord(join(parent, latest, "authority.json")) : undefined;
+		} catch {
+			return undefined;
+		}
 	}
 
 	current(): SupervisorEpoch | undefined {
@@ -55,15 +109,6 @@ export class SupervisorAuthority {
 	/** Reports from an older epoch are stale by definition (V07-RUN-002). */
 	acceptsReport(reportedEpoch: number, fencingToken: number, lease: { epoch: number; fence: number }): boolean {
 		return reportedEpoch === lease.epoch && fencingToken === lease.fence && reportedEpoch === (this.epoch?.epoch ?? -1);
-	}
-
-	private readLock(): { epoch: number; pid: number } | undefined {
-		if (!existsSync(this.lockFile)) return undefined;
-		try {
-			return JSON.parse(readFileSync(this.lockFile, "utf8")) as { epoch: number; pid: number };
-		} catch {
-			return undefined; // torn write: reclaimable
-		}
 	}
 
 	private isAlive(pid: number): boolean {

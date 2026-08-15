@@ -117,29 +117,29 @@ function activeTask() {
 	return state.snapshot.tasks.find((t) => !["done","cancelled"].includes(t.stage)) || null;
 }
 
-function badge(status) { return `<span class="badge ${status}">${status}</span>`; }
+function badge(status) { return `<span class="badge ${escapeHtml(status)}">${escapeHtml(status)}</span>`; }
 
 function renderOverview() {
 	const s = state.snapshot || { tasks: [] };
 	const active = activeTask();
 	$view.innerHTML = `
 		<div class="card"><h2>Repository</h2>
-			<div>${s.repositoryPath || ""}</div>
-			<div class="dim">config ${s.configValid ? "valid" : "INVALID"} · hash ${s.configHash || ""}</div></div>
+			<div>${escapeHtml(s.repositoryPath || "")}</div>
+			<div class="dim">config ${s.configValid ? "valid" : "INVALID"} · hash ${escapeHtml(s.configHash || "")}</div></div>
 		<div class="card"><h2>Active task</h2>
 			${active ? taskCard(active) : '<div class="dim">No active task</div>'}</div>
 		<div class="card"><h2>Checks</h2>${checksTable(active)}</div>`;
 }
 
 function taskCard(t) {
-	return `<div><strong>${t.id}</strong> ${escapeHtml(t.title)} · stage <strong>${t.stage}</strong> · run ${badge(t.runState)} · rev ${t.revision}</div>
+	return `<div><strong>${escapeHtml(t.id)}</strong> ${escapeHtml(t.title)} · stage <strong>${escapeHtml(t.stage)}</strong> · run ${badge(t.runState)} · rev ${escapeHtml(String(t.revision))}</div>
 	<div class="dim">reports: ${t.hasReports.plan ? "plan✓" : "plan✗"} ${t.hasReports.implementation ? "impl✓" : "impl✗"} ${t.hasReports.review ? "review✓" : "review✗"} · AC ${t.acceptanceTotal}</div>
 	<div class="actions">${actionsFor(t)}</div>`;
 }
 
 function actionsFor(t) {
 	const btn = (label, type, extra = "", cls = "") =>
-		`<button class="action ${cls}" data-type="${type}" data-task="${t.id}" data-rev="${t.revision}" ${extra}>${label}</button>`;
+		`<button class="action ${cls}" data-type="${type}" data-task="${escapeHtml(t.id)}" data-rev="${escapeHtml(String(t.revision))}" ${extra}>${label}</button>`;
 	let out = "";
 	if (t.stage === "plan") out += btn("Approve plan", "task.approve_plan") + btn("Reject plan", "task.reject_plan");
 	if (t.stage === "verify" || t.stage === "postverify") out += btn("Run checks", "checks.run");
@@ -162,13 +162,13 @@ function renderTasks() {
 	const s = state.snapshot || { tasks: [] };
 	$view.innerHTML = `<div class="card"><h2>Tasks</h2>
 	<table><thead><tr><th>id</th><th>title</th><th>stage</th><th>run</th><th>rev</th></tr></thead><tbody>
-	${s.tasks.map((t) => `<tr data-task="${t.id}" class="row"><td>${t.id}</td><td>${escapeHtml(t.title)}</td><td>${t.stage}</td><td>${badge(t.runState)}</td><td>${t.revision}</td></tr>`).join("") || '<tr><td colspan="5" class="dim">none</td></tr>'}
+	${s.tasks.map((t) => `<tr data-task="${escapeHtml(t.id)}" class="row"><td>${escapeHtml(t.id)}</td><td>${escapeHtml(t.title)}</td><td>${escapeHtml(t.stage)}</td><td>${badge(t.runState)}</td><td>${escapeHtml(String(t.revision))}</td></tr>`).join("") || '<tr><td colspan="5" class="dim">none</td></tr>'}
 	</tbody></table></div>
 	${state.selectedTask && s.tasks.find((t) => t.id === state.selectedTask) ? selectedCard(s.tasks.find((t) => t.id === state.selectedTask)) : ""}`;
 }
 
 function selectedCard(t) {
-	return `<div class="card"><h2>${t.id}</h2>${taskCard(t)}</div>`;
+	return `<div class="card"><h2>${escapeHtml(t.id)}</h2>${taskCard(t)}</div>`;
 }
 
 function renderRun() {
@@ -190,7 +190,7 @@ function renderVerification() {
 	const t = activeTask();
 	$view.innerHTML = `<div class="card"><h2>Verification</h2>
 		${t ? taskCard(t) + checksTable(t) : '<div class="dim">No active task.</div>'}
-		${t && t.integration ? `<div class="dim">integrated ${t.integration.revision.slice(0,10)} on ${t.integration.targetBranch} at ${t.integration.integratedAt}</div>` : ""}</div>`;
+		${t && t.integration ? `<div class="dim">integrated ${escapeHtml(t.integration.revision.slice(0,10))} on ${escapeHtml(t.integration.targetBranch)} at ${escapeHtml(t.integration.integratedAt)}</div>` : ""}</div>`;
 }
 
 async function renderConfiguration() {
@@ -238,9 +238,9 @@ async function applyDraft() {
 
 function renderDiagnostics() {
 	$view.innerHTML = `<div class="card"><h2>Diagnostics</h2>
-		<div>connection: ${state.connection}</div>
+		<div>connection: ${escapeHtml(state.connection)}</div>
 		<div>last event sequence: ${state.lastEventSequence}</div>
-		<div>projection version: ${state.snapshot ? state.snapshot.projectionVersion : "—"}</div>
+		<div>projection version: ${escapeHtml(String(state.snapshot ? state.snapshot.projectionVersion : "—"))}</div>
 		<div class="dim">Server is loopback-only and bound to this Pi process. It is not a sandbox boundary.</div></div>`;
 }
 
