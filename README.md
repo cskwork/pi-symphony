@@ -97,9 +97,13 @@ Repositories can define a validated stage graph in `config.yaml` (schema v2): st
 
 Managed worktrees give delegated roles isolated write surfaces: allocation happens only after a preview, paths are canonicalized outside the repository, and branch names are deterministic and collision-safe. Write ownership uses **fenced leases** — atomic compare-and-swap with monotonically increasing fencing tokens, so a stale owner's report can never be accepted after a transfer, and a moved head invalidates evidence before any gate trusts it. Delivery is typed, previewed, and audited: non-mutating preflight lists each blocker separately; a mutation that lands but fails checks yields `IntegratedUnverified` — no auto-reset, explicit operator disposition required; manual integration must prove the result contains the approved task head (squash equivalence needs an explicit acknowledgment). Git mutations in the product are limited to five typed command kinds — the read-only inspection allowlist covers everything else.
 
+## Multi-task scheduling (v0.6)
+
+Tasks can declare validated dependencies (`task_done`, `stage_reached`, `check_passed`) evaluated against durable state. The scheduler is deterministic: selection is a pure function of the snapshot (priority → aging → age tie-breaks), with a starvation bound so eligible work never waits forever. Dispatch is idempotent (intent → ack → reconcile → resolve); admission claims all required capacity or none; exclusive resources have exactly one owner; retries are classified (transient/deterministic/policy/user/unknown) with circuit breakers that halt retry storms.
+
 ## Status
 
-- **v0.5** — + managed worktrees, fenced write leases, typed controlled delivery.
-- v0.6 adds multi-task scheduling and bounded parallelism.
+- **v0.6** — + dependency DAG, deterministic scheduler, idempotent dispatch, capacity pools, retry taxonomy.
+- v0.7 adds detached runtime, resumability, and headless RPC.
 
 See `docs/` for version reports and review records.
