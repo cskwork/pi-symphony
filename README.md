@@ -106,7 +106,7 @@ npm run smoke:load   # 실제 pi 런타임에서 확장 로드 스모크
 
 ## 상태 — 1.0.1 (GA)
 
-프로덕션 레디: 위 모든 게이트가 테스트로 강제된다 (321 tests / 36 files, typecheck 클린, 실-pi 스모크 5/5). `CHANGELOG.md`, `docs/`(버전별 리포트, 보안 모델, 위협 모델, 트러블슈팅) 참고.
+프로덕션 레디: 위 모든 게이트가 테스트로 강제된다 (323 tests / 37 files, typecheck 클린, 실-pi 스모크 5/5). `CHANGELOG.md`, `docs/`(버전별 리포트, 보안 모델, 위협 모델, 트러블슈팅) 참고.
 
 **정직한 범위:** local-first, Pi-native, bounded, non-sandboxed, 자동 프로덕션 배포 없음. 안정성은 공개된 1.x 계약을 따른다.
 
