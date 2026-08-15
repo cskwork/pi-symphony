@@ -1,0 +1,40 @@
+{
+  "name": "@cskwork/pi-symphony",
+  "version": "0.1.0",
+  "description": "Symphony for Pi — evidence-based software-development workflow extension: Plan → Build → Review → Verify → Ready → Done with durable evidence.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "workflow",
+    "symphony"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./src/extension/index.ts"
+    ]
+  },
+  "main": "./src/extension/index.ts",
+  "scripts": {
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit",
+    "smoke:load": "node scripts/smoke-load.mjs"
+  },
+  "dependencies": {
+    "yaml": "^2.5.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@earendil-works/pi-tui": "^0.84.2",
+    "@types/node": "^22.0.0",
+    "typebox": "^1.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
