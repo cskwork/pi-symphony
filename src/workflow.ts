@@ -194,3 +194,67 @@ export function nextAction(
 	}
 	return { action: "none", detail: `task is ${stage}` };
 }
+
+
+// ---------------------------------------------------------------------------
+// Graph-driven runtime (PRD v0.3): a WorkflowDefinition compiles into the
+// same transition/contract model the v0.1 engine uses. The default graph is
+// byte-equivalent to the static tables above.
+// ---------------------------------------------------------------------------
+
+import type { WorkflowDefinition, StageDefinition } from "./workflow-def.ts";
+
+export interface CompiledGraph {
+	transitions: Readonly<Record<string, readonly string[]>>;
+	/** Contract lookup for an edge, including blocked-style entries. */
+	contractFor: (from: string, to: string) => TransitionCheck;
+	entryStage: string;
+	/** Stages whose exit requires a provenance-trusted review report. */
+	reviewGated: ReadonlySet<string>;
+}
+
+export function compileWorkflow(def: WorkflowDefinition): CompiledGraph {
+	const transitions: Record<string, readonly string[]> = {};
+	for (const stage of def.stages) {
+		const targets = [stage.onSuccess, stage.onRejected, stage.onBlockingFindings].filter((t): t is string => typeof t === "string");
+		transitions[stage.id] = targets;
+	}
+	const contracts: Record<string, TransitionCheck> = {};
+	const reviewGated = new Set<string>();
+	for (const stage of def.stages) {
+		const target = stage.onSuccess;
+		if (!target) continue;
+		const contract: TransitionCheck = {};
+		if (stage.outputs.includes("plan_report")) contract.requiresReports = [...(contract.requiresReports ?? []), "plan" as const];
+		if (stage.outputs.includes("implementation_report")) contract.requiresReports = [...(contract.requiresReports ?? []), "implementation" as const];
+		if (stage.outputs.includes("review_report")) {
+			contract.requiresReports = [...(contract.requiresReports ?? []), "review" as const];
+			// Independent review is an invariant, not a customization: any stage
+			// whose actor reviews and whose output certifies must be provenance-gated.
+			reviewGated.add(stage.id);
+			contract.requiresReviewProvenance = true;
+		}
+		if (stage.requiresApproval) contract.requiresApproval = "plan";
+		if (stage.requiresChecks && stage.requiresChecks !== "none") contract.requiresChecks = stage.requiresChecks;
+		contracts[`${stage.id}→${target}`] = contract;
+		// Entering a stage from a blocked state inherits the same contract.
+		contracts[`blocked→${target}`] = contract;
+	}
+	const entry = def.stages.find((s) => !def.stages.some((o) => o.onSuccess === s.id)) ?? def.stages[0]!;
+	return {
+		transitions,
+		contractFor: (from, to) => (from === "blocked" ? contracts[`blocked→${to}`] ?? {} : contracts[`${from}→${to}`] ?? {}),
+		entryStage: entry.id,
+		reviewGated,
+	};
+}
+
+/** The static v0.1 graph expressed as a CompiledGraph (used by default). */
+export function defaultCompiledGraph(): CompiledGraph {
+	return {
+		transitions: TRANSITIONS,
+		contractFor: (from, to) => contractFor(from as TaskStage, to as TaskStage),
+		entryStage: "plan",
+		reviewGated: new Set(["review"]),
+	};
+}

@@ -7,6 +7,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { SymphonyCore } from "../core.ts";
 import { proposeInit } from "../init.ts";
 import { SdkReviewerRunner } from "../reviewer.ts";
@@ -19,6 +20,7 @@ import { SymphonyOverlay, type OverlayAction, type OverlayModel } from "./overla
 import { buildBrief, configIssuesText, doctorLines, nextStepLine, planBrief, taskDetailPanes } from "./presentation.ts";
 import { classifyWrite, escapesCwd, findDestructiveCommand, pathRelativeTo, realpathOrSelf, redirectTargets, resolveToolPath } from "./guard.ts";
 import { WebControlPlane } from "../web/server.ts";
+import { SkillCatalog, activeCapabilities } from "../skills.ts";
 
 const SUBCOMMANDS = [
 	"init",
@@ -41,6 +43,16 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 	let coreCwd: string | undefined;
 	let sessionId = "unknown";
 	let webPlane: WebControlPlane | undefined;
+	let skillCatalog: SkillCatalog | undefined;
+
+	function skillsFor(ctx: ExtensionContext): SkillCatalog {
+		if (!skillCatalog) {
+			skillCatalog = new SkillCatalog([
+				{ dir: join(ctx.cwd, ".symphony", "skills"), source: "repository" },
+			]);
+		}
+		return skillCatalog;
+	}
 
 	function gitExecFactory(ctx: ExtensionContext) {
 		return async (argv: string[], options?: { cwd?: string; timeoutMs?: number }) => {
@@ -221,6 +233,74 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 	});
 
 	registerSymphonyTools(pi, (ctx) => ensureCore(ctx));
+
+	// V03-SKILL-001: progressive disclosure — the model sees catalog entries
+	// only; full bodies load on explicit, stage-bound selection.
+	pi.registerTool({
+		name: "sym_skills",
+		label: "Symphony skills",
+		description:
+			"List Symphony skills available for the current stage (catalog entries only). Full instructions load only after selection via sym_skill_select.",
+		parameters: Type.Object({
+			stage: Type.Optional(Type.String({ description: "Filter by stage (defaults to the active task stage)" })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const core = ensureCore(ctx);
+			const active = core.listTasks().find((t) => !["done", "cancelled"].includes(t.stage));
+			const stage = params.stage ?? active?.stage ?? "plan";
+			const entries = skillsFor(ctx)
+				.catalog()
+				.filter((e) => e.invocation === "explicit_only" || e.invocation === "policy" || e.stages.includes(stage));
+			const lines =
+				entries.length === 0
+					? ["No skills bound to this stage."]
+					: entries.map((e) => `- ${e.name} v${e.version} (${e.invocation}, ${e.source}): ${e.description}`);
+			return {
+				content: [{ type: "text" as const, text: [`Symphony skills for stage "${stage}":`, ...lines].join("\n") }],
+				details: { stage, entries },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "sym_skill_select",
+		label: "Load Symphony skill",
+		description: "Load the full instructions of one Symphony skill by name. Only catalog entries you saw via sym_skills may be selected.",
+		parameters: Type.Object({
+			name: Type.String({ description: "Exact skill name from the catalog" }),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const catalog = skillsFor(ctx);
+			const skill = catalog.get(params.name);
+			if (!skill) {
+				return {
+					content: [{ type: "text" as const, text: `Symphony: unknown skill "${params.name}" — call sym_skills for the catalog.` }],
+					details: { error: "unknown_skill" },
+				};
+			}
+			const body = catalog.loadBody(params.name);
+			// V03-SKILL-003: capabilities intersect with policy; disclose the verdict.
+			const capabilities = activeCapabilities(
+				["read_task", "read_repository", "read_diff", "read_check_evidence", "write_task_notes", "propose_report"],
+				["read_task", "read_repository", "read_diff", "read_check_evidence", "write_task_notes", "propose_report"],
+				[skill],
+			);
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: [
+							`# Skill: ${skill.name} v${skill.version} (${skill.source}, hash ${skill.contentHash.slice(0, 8)})`,
+							`Stages: ${skill.stages.join(", ")} · capabilities: ${capabilities.join(", ")}`,
+							"",
+							body ?? "(empty skill body)",
+						].join("\n"),
+					},
+				],
+				details: { name: skill.name, version: skill.version, source: skill.source, capabilities },
+			};
+		},
+	});
 
 	// -----------------------------------------------------------------------
 	// Command implementations

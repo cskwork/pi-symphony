@@ -85,9 +85,13 @@ pi -e ./src/extension/index.ts -p "/sym doctor"   # load smoke test
 
 `/sym web` starts a loopback-only server owned by the Pi process and prints a one-time URL like `http://127.0.0.1:43127/#token=…`. The token lives in the URL fragment (never sent in an HTTP request, never logged) and is exchanged for an in-memory session credential by the SPA. Mutating routes validate host, origin, credential, content type, and body size; the SPA has no external assets and a strict CSP. `/sym web stop|status|open` control the lifecycle. The browser is a thin client: every action goes through the same `SymphonyCore` commands as the TUI, and SSE with `Last-Event-ID` replay keeps both surfaces synchronized.
 
+## Workflow customization & skills (v0.3)
+
+Repositories can define a validated stage graph in `config.yaml` (schema v2): structured stages with typed data-only conditions (`task_kind`, `task_field`, `changed_paths`, `all/any/not`), declared inputs/outputs, approval and check gates, plus enforced invariants — no path to Done can bypass deterministic verification or completion evidence, and independent-review provenance is never optional. Skills live in `.symphony/skills/<name>/skill.yaml` with declared capabilities; the model sees catalog entries only (`sym_skills`) and loads full instructions on selection (`sym_skill_select`). Skills are hash-pinned; content drift requires re-approval, and a skill can never grant a capability that role/repository policy forbids.
+
 ## Status
 
-- **v0.2** — Pi-native foundation + synchronized local HTML control plane.
-- v0.3 adds workflow customization and composable skills.
+- **v0.3** — + workflow customization, typed conditions, simulation, composable skills, v1→v2 config migration.
+- v0.4 adds delegation, role topology, and durable handoffs.
 
 See `docs/` for version reports and review records.

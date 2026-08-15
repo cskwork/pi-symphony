@@ -1,6 +1,6 @@
 {
   "name": "@cskwork/pi-symphony",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Symphony for Pi \u2014 evidence-based software-development workflow extension: Plan \u2192 Build \u2192 Review \u2192 Verify \u2192 Ready \u2192 Done with durable evidence.",
   "type": "module",
   "keywords": [
