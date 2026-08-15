@@ -93,8 +93,11 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 		return async (argv: string[], options?: { cwd?: string; timeoutMs?: number }) => {
 			const { assertReadOnlyGit } = await import("../gitinfo.ts");
 			assertReadOnlyGit(argv);
-			const result = await pi.exec(argv[0]!, argv.slice(1), {
-				cwd: options?.cwd ?? ctx.cwd,
+			const cwd = options?.cwd ?? ctx.cwd;
+			// Pi's cwd option is not reliable across every extension execution
+			// boundary. Pass the inspected repository explicitly to Git while
+			// keeping the caller's command under the read-only allowlist above.
+			const result = await pi.exec("git", ["-C", cwd, ...argv], {
 				timeout: options?.timeoutMs ?? 15_000,
 			});
 			return { code: result.code, stdout: result.stdout, stderr: result.stderr };

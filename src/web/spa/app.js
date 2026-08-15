@@ -5,8 +5,10 @@ const state = {
 	connection: "disconnected",
 	snapshot: null,
 	lastEventSequence: 0,
+	lastEventId: null,
 	token: null,
-	es: null,
+	eventAbortController: null,
+	reconnectTimer: null,
 	view: "overview",
 	selectedTask: null,
 	configDraft: null,
@@ -15,6 +17,7 @@ const state = {
 };
 
 const $view = document.getElementById("view");
+const $nav = document.querySelector("nav[aria-label='Primary']");
 const $connection = document.getElementById("connection");
 const $repo = document.getElementById("repo");
 const $status = document.getElementById("status");
@@ -49,28 +52,89 @@ async function fetchSnapshot() {
 	render();
 }
 
-function connectEvents() {
-	if (state.es) state.es.close();
-	setConnection("reconnecting");
-	const es = new EventSource("/api/v1/events?lastEventId=" + state.lastEventId || "/api/v1/events", { withCredentials: false });
-	state.es = es;
-	es.addEventListener("open", () => setConnection("live"));
-	es.addEventListener("error", () => { setConnection("reconnecting"); });
-	es.addEventListener("snapshot_required", async () => {
+function parseSseEvent(block) {
+	let type = "message";
+	let lastEventId = "";
+	const data = [];
+	for (const line of block.split("\n")) {
+		if (line.startsWith(":")) continue;
+		const separator = line.indexOf(":");
+		const field = separator === -1 ? line : line.slice(0, separator);
+		const value = (separator === -1 ? "" : line.slice(separator + 1)).replace(/^ /, "");
+		if (field === "event") type = value;
+		else if (field === "id") lastEventId = value;
+		else if (field === "data") data.push(value);
+	}
+	return data.length > 0 ? { type, data: data.join("\n"), lastEventId } : null;
+}
+
+const eventTypes = ["task.created","task.stage_changed","task.run_state_changed","task.updated","report.submitted","check.completed","attempt.started","attempt.completed","attempt.interrupted","approval.resolved","integration.recorded","config.applied"];
+
+async function handleSseEvent(sseEvent) {
+	if (sseEvent.type === "snapshot_required") {
 		setConnection("snapshot");
+		state.lastEventId = null;
 		await fetchSnapshot();
 		connectEvents();
-	});
-	for (const type of ["task.created","task.stage_changed","task.run_state_changed","task.updated","report.submitted","check.completed","attempt.started","attempt.completed","attempt.interrupted","approval.resolved","integration.recorded","config.applied"]) {
-		es.addEventListener(type, async (ev) => {
-			const event = JSON.parse(ev.data);
-			state.lastEventId = event.eventId;
-			state.lastEventSequence = event.sequence;
-			$events.textContent = `event ${event.sequence} · ${event.type}`;
-			await fetchSnapshot(); // projection follows the same events
-			setConnection("live");
-		});
+		return;
 	}
+	if (!eventTypes.includes(sseEvent.type)) return;
+	const event = JSON.parse(sseEvent.data);
+	state.lastEventId = sseEvent.lastEventId || state.lastEventId;
+	state.lastEventSequence = event.sequence;
+	$events.textContent = `event ${event.sequence} · ${event.type}`;
+	await fetchSnapshot(); // projection follows the same events
+	setConnection("live");
+}
+
+function scheduleReconnect() {
+	if (state.reconnectTimer || !token()) return;
+	state.reconnectTimer = setTimeout(() => {
+		state.reconnectTimer = null;
+		connectEvents();
+	}, 1000);
+}
+
+function connectEvents() {
+	state.eventAbortController?.abort();
+	if (state.reconnectTimer) {
+		clearTimeout(state.reconnectTimer);
+		state.reconnectTimer = null;
+	}
+	const controller = new AbortController();
+	state.eventAbortController = controller;
+	setConnection("reconnecting");
+	const headers = authHeaders(false);
+	if (state.lastEventId) headers["Last-Event-ID"] = state.lastEventId;
+	void (async () => {
+		try {
+			const res = await fetch("/api/v1/events", { headers, signal: controller.signal });
+			if (!res.ok || !res.body) throw new Error("event stream unavailable");
+			setConnection("live");
+			const reader = res.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = "";
+			while (!controller.signal.aborted) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+				let boundary;
+				while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+					const block = buffer.slice(0, boundary);
+					buffer = buffer.slice(boundary + 2);
+					const sseEvent = parseSseEvent(block);
+					if (sseEvent) await handleSseEvent(sseEvent);
+					if (controller.signal.aborted) return;
+				}
+			}
+		} catch {
+			if (controller.signal.aborted) return;
+		}
+		if (!controller.signal.aborted) {
+			setConnection("reconnecting");
+			scheduleReconnect();
+		}
+	})();
 }
 
 async function sendCommand(type, aggregateId, expectedRevision, payload) {
@@ -252,15 +316,25 @@ function escapeHtml(text) {
 // Event delegation: buttons and task rows
 // ---------------------------------------------------------------------------
 
+function selectView(button) {
+	const view = button.dataset.view;
+	if (!view) return;
+	state.view = view;
+	document.querySelectorAll("button.nav").forEach((b) => b.classList.toggle("active", b === button));
+	render();
+}
+
+$nav?.addEventListener("click", (ev) => {
+	const target = ev.target;
+	if (!(target instanceof HTMLElement)) return;
+	const button = target.closest("button.nav");
+	if (!(button instanceof HTMLElement)) return;
+	selectView(button);
+});
+
 $view.addEventListener("click", async (ev) => {
 	const target = ev.target;
 	if (!(target instanceof HTMLElement)) return;
-	if (target.classList.contains("nav")) {
-		state.view = target.dataset.view;
-		document.querySelectorAll("button.nav").forEach((b) => b.classList.toggle("active", b === target));
-		render();
-		return;
-	}
 	if (target.classList.contains("row")) {
 		state.selectedTask = target.dataset.task;
 		state.view = "tasks";

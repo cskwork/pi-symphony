@@ -350,14 +350,14 @@ footer a { text-decoration: none; } footer a:hover { color: var(--fg); }
     <h2 data-i18n="instH">한 줄 설치</h2>
     <p class="lede" data-i18n="instSub">Pi 0.84+ · Node 22+ · git 2.30+. 설치 후 어떤 저장소에서든 /sym으로 시작합니다.</p>
     <pre class="code"><span class="c"># GitHub에서 설치</span>
-pi install github:cskwork/pi-symphony
+pi install git:github.com/cskwork/pi-symphony
 
 <span class="c"># 저장소 안에서</span>
 /sym init      <span class="c"># <span data-i18n="inst1">체크 제안 확인 → .symphony/ 생성</span></span>
 /sym new       <span class="c"># <span data-i18n="inst2">인수기준 + 리스크로 작업 생성</span></span>
 /sym continue  <span class="c"># <span data-i18n="inst3">다음 단계로 (기억할 명령은 이것 하나)</span></span>
 /sym web       <span class="c"># <span data-i18n="inst4">브라우저 컨트롤 플레인 (loopback)</span></span></pre>
-    <div class="cmdline" id="copyCmd" role="button" tabindex="0"><span class="ps">$</span>pi install github:cskwork/pi-symphony<span class="hint" data-i18n="copy">클릭하여 복사</span></div>
+    <div class="cmdline" id="copyCmd" role="button" tabindex="0"><span class="ps">$</span>pi install git:github.com/cskwork/pi-symphony<span class="hint" data-i18n="copy">클릭하여 복사</span></div>
     <p class="stat" data-i18n="statLine">v1.0.1 · <b>321</b> tests · <b>36</b> suites · tsc clean · real-pi smoke <b>5/5</b> · <b>4</b>차례 적대적 리뷰 · 모든 확정 findings 수정 + 회귀 테스트</p>
   </div>
 </section>
@@ -466,7 +466,7 @@ themeBtn.addEventListener("click", () => setTheme(document.documentElement.class
 /* copy install command */
 const cmd = $("#copyCmd");
 function copyCmd() {
-  const text = "pi install github:cskwork/pi-symphony";
+  const text = "pi install git:github.com/cskwork/pi-symphony";
   navigator.clipboard?.writeText(text).catch(() => {});
   const hint = cmd.querySelector(".hint"); if (hint) { const old = hint.textContent; hint.textContent = "✓"; setTimeout(() => (hint.textContent = old), 1200); }
 }

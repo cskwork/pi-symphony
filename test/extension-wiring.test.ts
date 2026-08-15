@@ -24,6 +24,7 @@ function makeFakePi() {
 	const tools = new Map<string, RegisteredTool>();
 	const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
 	const sentMessages: string[] = [];
+	const execCalls: Array<{ command: string; args: string[]; options?: { cwd?: string; timeout?: number } }> = [];
 	const pi = {
 		registerCommand: (name: string, def: { handler: (args: string, ctx: unknown) => Promise<void> }) =>
 			commands.set(name, def),
@@ -37,6 +38,7 @@ function makeFakePi() {
 			handlers.set(event, list);
 		},
 		exec: async (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => {
+			execCalls.push({ command, args, options });
 			try {
 				const stdout = execFileSync(command, args, {
 					cwd: options?.cwd,
@@ -53,7 +55,7 @@ function makeFakePi() {
 			sentMessages.push(text);
 		},
 	};
-	return { pi, commands, tools, handlers, sentMessages };
+	return { pi, commands, tools, handlers, sentMessages, execCalls };
 }
 
 function makeFakeCtx(dir: string, answers: { input?: Record<string, string>; select?: Record<string, string>; confirm?: Record<string, boolean>; editor?: Record<string, string> } = {}) {
@@ -100,7 +102,7 @@ describe("extension wiring", () => {
 	});
 
 	it("runs init → new → continue(plan) → plan tool → continue(build) → build tool → review stage", async () => {
-		const { pi, commands, tools, sentMessages } = makeFakePi();
+		const { pi, commands, tools, sentMessages, execCalls } = makeFakePi();
 		symphonyExtension(pi as never);
 		const handler = commands.get("sym")!.handler;
 		const { ctx } = makeFakeCtx(dir, {
@@ -115,6 +117,11 @@ describe("extension wiring", () => {
 
 		await handler("init", ctx);
 		expect(readFileSync(join(dir, ".symphony", "config.yaml"), "utf8")).toMatch(/task_prefix: DEV/);
+		expect(execCalls[0]).toMatchObject({
+			command: "git",
+			args: ["-C", dir, "rev-parse", "--is-inside-work-tree"],
+		});
+		expect(execCalls[0]?.options?.cwd).toBeUndefined();
 
 		await handler("new", ctx);
 		expect(readFileSync(join(dir, ".symphony", "tasks", "DEV-001.md"), "utf8")).toMatch(/Wire feature Y/);

@@ -10,7 +10,7 @@ Fix pagination race · AC 2/3 · checks not run
 ## 설치
 
 ```bash
-pi install github:cskwork/pi-symphony   # GitHub에서 설치
+pi install git:github.com/cskwork/pi-symphony   # GitHub에서 설치
 # 또는 npm 게시 후: pi install npm:@cskwork/pi-symphony
 ```
 
