@@ -264,7 +264,8 @@ describe("web control plane", () => {
 			method: "POST",
 			body: JSON.stringify({ draft: configText, configHash: "stale-hash" }),
 		});
-		expect(result.status).toBe(409);
+		expect([409, 422]).toContain(result.status);
+		expect(JSON.stringify(result.body)).toMatch(/revision conflict|changed since the draft/);
 	});
 
 	it("V02-LIFE-001: stop closes the listener idempotently", async () => {

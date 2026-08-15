@@ -153,22 +153,29 @@ export class OutboundQueue {
 
 /**
  * Push preflight (V08-OUT-002): verify remote identity, branch policy, local
- * head, and non-force mode immediately before execution.
+ * head ancestry, and non-force mode immediately before execution. Ancestry is
+ * answered by the caller via a real `git merge-base --is-ancestor` probe —
+ * push is a fast-forward only when the remote head is an ancestor of the
+ * local head; anything else refuses to overwrite.
  */
-export function pushPreflight(input: { remote: string; expectedRemote: string; branch: string; allowedBranches: string[]; localHead: string; remoteHead: string; force: boolean }): { ok: true } | { ok: false; error: string } {
+export function pushPreflight(input: {
+	remote: string;
+	expectedRemote: string;
+	branch: string;
+	allowedBranches: string[];
+	localHead: string;
+	remoteHead: string;
+	force: boolean;
+	/** True when remoteHead is an ancestor of localHead (git merge-base --is-ancestor). */
+	remoteIsAncestor: boolean;
+}): { ok: true } | { ok: false; error: string } {
 	if (input.remote !== input.expectedRemote) return { ok: false, error: `remote mismatch: ${input.remote} ≠ ${input.expectedRemote}` };
 	if (!input.allowedBranches.includes(input.branch)) return { ok: false, error: `branch "${input.branch}" is not push-allowed` };
 	if (input.force) return { ok: false, error: "force push is never authorized by Symphony" };
-	if (input.remoteHead !== input.localHead && !isAncestorLike(input.remoteHead)) {
+	if (input.remoteHead !== input.localHead && !input.remoteIsAncestor) {
 		return { ok: false, error: `remote diverged (remote ${input.remoteHead.slice(0, 8)}) — fetch/merge first; refusing to overwrite` };
 	}
 	return { ok: true };
-}
-
-function isAncestorLike(_sha: string): boolean {
-	// The caller supplies real ancestry data in production; here any remote
-	// head equal to local is a fast-forward, divergence aborts.
-	return false;
 }
 
 /**

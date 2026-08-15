@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1 — post-GA review fixes
+
+Config schema v2 fully supported (migration no longer bricks the repository); config apply routed through the core command service; custom workflows compile into the engine; worktree/queue/supervisor/delegation surfaces user-reachable (`/sym worktree`, `/sym queue`, `/sym supervisor`); reviewer tool allowlist enforced; push preflight uses real ancestry; six concurrency/bridge/XSS/path-traversal bugs fixed with regression tests; docs corrected to the audited state.
+
 ## 1.0.0 — production general availability
 
 Everything below, hardening pass complete: compatibility matrix, threat model with test traceability, adversarial path corpus, migration journal, performance budgets, pagination, centralized resource limits, reproducible packaging metadata, and full documentation (install, workflow, security model, threat model, troubleshooting, per-version reports).

@@ -36,6 +36,14 @@ export interface ReviewerRoleConfig {
 
 export const DEFAULT_REVIEWER_TOOLS = ["read", "grep", "find", "ls"];
 
+/** The reviewer is read-only by product invariant — config cannot widen it. */
+export const REVIEWER_ALLOWED_TOOLS = new Set([...DEFAULT_REVIEWER_TOOLS, "sym_task_read", "sym_diff_read"]);
+
+export function sanitizeReviewerTools(tools: string[]): string[] {
+	const safe = tools.filter((t) => REVIEWER_ALLOWED_TOOLS.has(t));
+	return safe.length > 0 ? safe : [...DEFAULT_REVIEWER_TOOLS];
+}
+
 /**
  * Parse the reviewer's structured output. The reviewer is instructed to end
  * with a fenced ```review block containing verdict+findings JSON.
@@ -104,7 +112,9 @@ export class SdkReviewerRunner implements ReviewerRunner {
 	 */
 	buildSessionPlan() {
 		return {
-			tools: this.role.tools.length > 0 ? [...this.role.tools] : [...DEFAULT_REVIEWER_TOOLS],
+			// Read-only invariant enforced here too: any configured mutation
+			// tool is dropped, never passed to the fresh session.
+			tools: sanitizeReviewerTools(this.role.tools),
 			noExtensions: true,
 			noSkills: true,
 			noContextFiles: true,

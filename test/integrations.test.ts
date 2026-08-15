@@ -82,12 +82,12 @@ describe("outbound operations (V08-OUT-*)", () => {
 	});
 
 	it("push preflight aborts on divergence and never authorizes force", () => {
-		const base = { remote: "origin", expectedRemote: "origin", branch: "main", allowedBranches: ["main"], force: false, localHead: "a".repeat(40), remoteHead: "a".repeat(40) };
+		const base = { remote: "origin", expectedRemote: "origin", branch: "main", allowedBranches: ["main"], force: false, localHead: "a".repeat(40), remoteHead: "a".repeat(40), remoteIsAncestor: true };
 		expect(pushPreflight({ ...base }).ok).toBe(true);
 		expect(pushPreflight({ ...base, remote: "evil", localHead: "a".repeat(40), remoteHead: "a".repeat(40) }).ok).toBe(false);
 		expect(pushPreflight({ ...base, branch: "develop", localHead: "a".repeat(40), remoteHead: "a".repeat(40) }).ok).toBe(false);
 		expect(pushPreflight({ ...base, force: true, localHead: "a".repeat(40), remoteHead: "a".repeat(40) }).ok).toBe(false);
-		const diverged = pushPreflight({ ...base, localHead: "a".repeat(40), remoteHead: "b".repeat(40) });
+		const diverged = pushPreflight({ ...base, localHead: "a".repeat(40), remoteHead: "b".repeat(40), remoteIsAncestor: false });
 		expect(diverged.ok).toBe(false);
 		if (!diverged.ok) expect(diverged.error).toMatch(/diverged/);
 	});

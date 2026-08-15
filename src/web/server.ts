@@ -401,20 +401,17 @@ export class WebControlPlane {
 		const body = await this.readBody(req, MAX_COMMAND_BODY_BYTES);
 		if (!body.ok) return this.json(res, body.status, { error: body.reason });
 		const parsed = JSON.parse(body.text) as { draft?: string; configHash?: string };
-		if (parsed.configHash !== undefined && parsed.configHash !== configHash(this.core.config)) {
-			return this.json(res, 409, { error: "revision_conflict", currentConfigHash: configHash(this.core.config) });
+
+		// Single mutation path: the adapter NEVER writes config files itself —
+		// everything goes through the core command (validation, backup, atomic
+		// write, reload, durable config.applied event).
+		const result = await this.core.applyConfig({ draftYaml: parsed.draft ?? "", expectedHash: parsed.configHash });
+		if (!result.ok) {
+			this.audit.push({ at: new Date().toISOString(), type: "config.apply", result: "rejected", detail: result.error });
+			const validationIssue = /invalid|conflict/.test(result.error ?? "") ? 422 : 500;
+			return this.json(res, validationIssue, { error: "config_invalid", issues: [{ path: "$", message: result.error }], remediation: result.next });
 		}
-		const validation = loadConfigFromText(parsed.draft ?? "");
-		if (validation.issues.length > 0) {
-			return this.json(res, 422, { error: "config_invalid", issues: validation.issues });
-		}
-		const core = this.coreFactory(); // fresh core so the applied config reloads
-		const backedUp = backupFile(core.paths.config);
-		const { writeFileSync, mkdirSync, renameSync } = await import("node:fs");
-		const tmp = `${core.paths.config}.tmp`;
-		mkdirSync(dirname(core.paths.config), { recursive: true });
-		writeFileSync(tmp, parsed.draft ?? "", "utf8");
-		renameSync(tmp, core.paths.config);
+		this.audit.push({ at: new Date().toISOString(), type: "config.apply", result: "accepted" });
 		this.bridge?.publish({
 			eventId: `cfg-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`,
 			sequence: 0, // bridge assigns its own global ordering
@@ -422,10 +419,9 @@ export class WebControlPlane {
 			aggregateId: "config",
 			aggregateRevision: 0,
 			emittedAt: new Date().toISOString(),
-			data: { backedUp: backedUp ?? null, hash: configHash(validation.config!) },
+			data: { hash: configHash(this.core.config), backedUp: result.value.backedUp ?? null },
 		});
-		this.audit.push({ at: new Date().toISOString(), type: "config.apply", result: "accepted" });
-		return this.json(res, 200, { applied: true, backedUp: backedUp ?? null });
+		return this.json(res, 200, { applied: true, backedUp: result.value.backedUp ?? null });
 	}
 
 	private artifact(path: string, res: ServerResponse): void {

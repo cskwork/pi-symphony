@@ -27,9 +27,13 @@ describe("config schema v1", () => {
 		expect(config!.roles.reviewer.session).toBe("fresh");
 	});
 
-	it("rejects unsupported versions with migration guidance", () => {
-		const { issues } = loadConfigFromText(validYaml.replace("version: 1", "version: 2"));
-		expect(issues[0]!.message).toMatch(/unsupported schema version.*migrate/);
+	it("supports schema v2 (post-migration configs keep working)", () => {
+		const { issues, config } = loadConfigFromText(validYaml.replace("version: 1", "version: 2"));
+		expect(issues).toEqual([]);
+		expect(config!.version).toBe(2);
+		// unsupported versions still fail with migration guidance
+		const { issues: bad } = loadConfigFromText(validYaml.replace("version: 1", "version: 3"));
+		expect(bad[0]!.message).toMatch(/unsupported schema version/);
 	});
 
 	it("rejects malformed YAML", () => {

@@ -4,8 +4,33 @@ import { parse as parseYaml } from "yaml";
 import type { CommandDefinition } from "./types.ts";
 
 /** Configuration schema v1 (see PRD v0.1 "Configuration schema v1"). */
+export interface WorkflowStageConfig {
+	id: string;
+	actor: string;
+	purpose?: string;
+	when?: unknown;
+	inputs: string[];
+	outputs: string[];
+	onSuccess?: string;
+	onRejected?: string;
+	onBlockingFindings?: string;
+	requiresChecks?: "verify" | "postIntegration" | "none";
+	requiresApproval?: string;
+	terminal?: boolean;
+}
+
+export interface SkillsConfig {
+	catalogs: Array<{ path: string; trust: "repository" | "user" }>;
+	stageBindings: Record<string, string[]>;
+	modelSelection: { enabled: boolean; maxSelected: number };
+}
+
 export interface SymphonyConfig {
-	version: 1;
+	version: 1 | 2;
+	/** v2: validated custom stage graph (absent = default software-dev preset). */
+	customStages?: WorkflowStageConfig[];
+	workflowInvariants?: { requireDeterministicVerify: boolean; requireCompletionEvidence: boolean };
+	skills?: SkillsConfig;
 	project: {
 		name: string;
 		taskPrefix: string;
@@ -118,16 +143,17 @@ export function validateConfig(raw: unknown): { issues: ConfigIssue[]; config?: 
 	const doc = raw as Record<string, unknown>;
 
 	const version = doc["version"];
-	if (version !== 1) {
+	if (version !== 1 && version !== 2) {
 		issues.push({
 			path: "version",
-			message: `unsupported schema version ${JSON.stringify(version)}; run /sym init to migrate (v0.1 supports version 1 only)`,
+			message: `unsupported schema version ${JSON.stringify(version)}; supported: 1 and 2 (run the v1→v2 migration via /sym migrate)`,
 		});
 		return { issues };
 	}
 
 	const projectRaw = (doc["project"] ?? {}) as Record<string, unknown>;
 	const cfg: SymphonyConfig = defaultConfig(String(projectRaw["name"] ?? "project"));
+	cfg.version = version === 2 ? 2 : 1;
 	const unknown: Record<string, unknown> = {};
 	for (const key of Object.keys(doc)) {
 		if (!["version", "project", "ui", "workspace", "workflow", "roles", "commands", "checks", "security", "limits"].includes(key)) {
@@ -159,11 +185,76 @@ export function validateConfig(raw: unknown): { issues: ConfigIssue[]; config?: 
 	}
 	if (workspace["max_active_tasks"] !== undefined) {
 		const n = workspace["max_active_tasks"];
-		if (n !== 1) issues.push({ path: "workspace.max_active_tasks", message: "v0.1 allows exactly 1 active task" });
+		if (typeof n !== "number" || !Number.isInteger(n) || n < 1 || n > 8) {
+			issues.push({ path: "workspace.max_active_tasks", message: "max_active_tasks must be an integer 1-8 (the v0.6 scheduler bounds parallelism)" });
+		} else {
+			cfg.workspace.maxActiveTasks = n;
+		}
 	}
 
 	// workflow
 	const workflow = expectObject(doc["workflow"], "workflow", issues) ?? {};
+	if (version === 2) {
+		const stagesRaw = workflow["stages"];
+		if (stagesRaw !== undefined && stagesRaw !== "default") {
+			if (!Array.isArray(stagesRaw) || stagesRaw.length === 0) {
+				issues.push({ path: "workflow.stages", message: "stages must be a non-empty list or \"default\"" });
+			} else {
+				cfg.customStages = [];
+				for (const [index, stageRaw] of (stagesRaw as unknown[]).entries()) {
+					const stage = expectObject(stageRaw, `workflow.stages[${index}]`, issues) ?? {};
+					const id = String(stage["id"] ?? "");
+					if (!id) issues.push({ path: `workflow.stages[${index}].id`, message: "stage id is required" });
+					const inputs = stringArray(stage["inputs"], `workflow.stages[${index}].inputs`, issues);
+					const outputs = stringArray(stage["outputs"], `workflow.stages[${index}].outputs`, issues);
+					if (inputs === undefined || outputs === undefined || !id) continue;
+					const parsedStage: WorkflowStageConfig = {
+						id,
+						actor: String(stage["actor"] ?? "none"),
+						inputs,
+						outputs,
+					};
+					if (stage["purpose"] !== undefined) parsedStage.purpose = String(stage["purpose"]);
+					if (stage["when"] !== undefined) parsedStage.when = stage["when"];
+					for (const key of ["on_success", "on_rejected", "on_blocking_findings"] as const) {
+						const value = stage[key];
+						if (value !== undefined && typeof value !== "string") {
+							issues.push({ path: `workflow.stages[${index}].${key}`, message: "transition target must be a stage id string" });
+						} else if (value !== undefined) {
+							parsedStage[key === "on_success" ? "onSuccess" : key === "on_rejected" ? "onRejected" : "onBlockingFindings"] = value;
+						}
+					}
+					const checks = stage["requires_checks"];
+					if (checks !== undefined && !["verify", "postIntegration", "none"].includes(String(checks))) {
+						issues.push({ path: `workflow.stages[${index}].requires_checks`, message: "requires_checks must be verify|postIntegration|none" });
+					} else if (checks !== undefined) {
+						parsedStage.requiresChecks = checks as WorkflowStageConfig["requiresChecks"];
+					}
+					if (stage["requires_approval"] !== undefined) parsedStage.requiresApproval = String(stage["requires_approval"]);
+					if (stage["terminal"] === true) parsedStage.terminal = true;
+					cfg.customStages!.push(parsedStage);
+				}
+			}
+		}
+		const invariants = expectObject(workflow["invariants"], "workflow.invariants", issues);
+		if (invariants) {
+			cfg.workflowInvariants = {
+				requireDeterministicVerify: invariants["require_deterministic_verify"] !== false,
+				requireCompletionEvidence: invariants["require_completion_evidence"] !== false,
+			};
+			if (cfg.workflowInvariants.requireDeterministicVerify === false) {
+				issues.push({ path: "workflow.invariants.require_deterministic_verify", message: "deterministic verification cannot be disabled — it is a product invariant" });
+			}
+		}
+		const skills = expectObject(doc["skills"], "skills", issues);
+		if (skills) {
+			cfg.skills = {
+				catalogs: [{ path: ".symphony/skills", trust: "repository" }],
+				stageBindings: {},
+				modelSelection: { enabled: true, maxSelected: 2 },
+			};
+		}
+	}
 	if (workflow["plan_approval"] !== undefined && !["risks_only", "always", "never"].includes(String(workflow["plan_approval"]))) {
 		issues.push({ path: "workflow.plan_approval", message: 'plan_approval must be one of risks_only|always|never' });
 	} else if (workflow["plan_approval"] !== undefined) cfg.workflow.planApproval = workflow["plan_approval"] as SymphonyConfig["workflow"]["planApproval"];
@@ -189,6 +280,20 @@ export function validateConfig(raw: unknown): { issues: ConfigIssue[]; config?: 
 		if (role["tools"] !== undefined) {
 			if (!Array.isArray(role["tools"]) || role["tools"].some((t) => typeof t !== "string")) {
 				issues.push({ path: `roles.${roleName}.tools`, message: "tools must be a list of tool names" });
+			} else {
+				if (roleName === "reviewer") {
+					// The independent reviewer is read-only by product invariant:
+					// mutation tools in configuration are rejected, not ignored.
+					const mutation = (role["tools"] as string[]).filter((t) => ["bash", "write", "edit"].includes(t));
+					if (mutation.length > 0) {
+						issues.push({
+							path: "roles.reviewer.tools",
+							message: `the reviewer session is read-only; mutation tools are not allowed (found: ${mutation.join(", ")})`,
+						});
+					} else {
+						cfg.roles.reviewer.tools = role["tools"] as string[];
+					}
+				}
 			}
 		}
 	}
@@ -391,3 +496,57 @@ export function configHash(config: SymphonyConfig): string {
 	const canonical = JSON.stringify(config, (key, value) => (key === "_unknown" ? undefined : value));
 	return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
 }
+
+
+/**
+ * Validate a v2 custom stage graph using the workflow-definition layer:
+ * conditions must parse and the graph must satisfy its invariants. Called by
+ * the core after schema validation so drafts fail before ever touching disk.
+ */
+export async function validateCustomWorkflow(
+	stages: WorkflowStageConfig[],
+	invariants: { requireDeterministicVerify: boolean; requireCompletionEvidence: boolean },
+): Promise<{ ok: true; issues: ConfigIssue[] } | { ok: false; issues: ConfigIssue[] }> {
+	const workflowDef = await import("./workflow-def.ts");
+	const issues: ConfigIssue[] = [];
+	const definitions = stages.map((stage) => {
+		let when;
+		if (stage.when !== undefined) {
+			try {
+				when = workflowDef.parseCondition(stage.when, `workflow.stages[id=${stage.id}].when`);
+			} catch (err) {
+				issues.push({
+					path: `workflow.stages[id=${stage.id}].when`,
+					message: (err as Error).message,
+				});
+			}
+		}
+		return {
+			id: stage.id,
+			actor: stage.actor,
+			purpose: stage.purpose,
+			when,
+			inputs: stage.inputs,
+			outputs: stage.outputs,
+			onSuccess: stage.onSuccess,
+			onRejected: stage.onRejected,
+			onBlockingFindings: stage.onBlockingFindings,
+			requiresChecks: stage.requiresChecks,
+			requiresApproval: stage.requiresApproval,
+			terminal: stage.terminal,
+		} satisfies import("./workflow-def.ts").StageDefinition;
+	});
+	if (issues.length > 0) return { ok: false, issues };
+	const graphIssues = workflowDef.validateGraph({
+		stages: definitions,
+		invariants: {
+			requireDeterministicVerify: invariants.requireDeterministicVerify,
+			requireCompletionEvidence: invariants.requireCompletionEvidence,
+		},
+	});
+	for (const issue of graphIssues) {
+		issues.push({ path: issue.stage ? `workflow.stages[id=${issue.stage}]` : "workflow.stages", message: issue.message });
+	}
+	return issues.length === 0 ? { ok: true, issues } : { ok: false, issues };
+}
+

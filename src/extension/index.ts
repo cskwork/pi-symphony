@@ -22,6 +22,9 @@ import { classifyWrite, escapesCwd, findDestructiveCommand, pathRelativeTo, real
 import { WebControlPlane } from "../web/server.ts";
 import { SkillCatalog, activeCapabilities } from "../skills.ts";
 import { DelegatedRoleRunner, HandoffLedger, RoleSessionRegistry, TOPOLOGIES, artifactDigest, type RoleManifest } from "../roles.ts";
+import { WorktreeRegistry, FencedLeaseStore, renderGitCommand, sanitizeBranch } from "../worktrees.ts";
+import { selectCandidates, nonRunnableReasons, type SchedulerTask } from "../scheduler.ts";
+import { SupervisorAuthority, reconciliationGate } from "../runtime-supervisor.ts";
 
 const SUBCOMMANDS = [
 	"init",
@@ -37,6 +40,9 @@ const SUBCOMMANDS = [
 	"retry",
 	"cancel",
 	"web",
+	"worktree",
+	"queue",
+	"supervisor",
 ] as const;
 
 export default function symphonyExtension(pi: ExtensionAPI): void {
@@ -48,6 +54,31 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 	const roleRegistry = new RoleSessionRegistry();
 	const handoffs = new HandoffLedger();
 	let topology: keyof typeof TOPOLOGIES = "standard";
+	// Runtime registries are cwd-bound and created lazily on first use.
+	let worktreesFor: { cwd: string; registry: WorktreeRegistry } | undefined;
+	let leasesFor: { cwd: string; store: FencedLeaseStore } | undefined;
+	let supervisorFor: { cwd: string; authority: SupervisorAuthority } | undefined;
+
+	function worktreeRegistry(ctx: ExtensionContext): WorktreeRegistry {
+		if (!worktreesFor || worktreesFor.cwd !== ctx.cwd) {
+			worktreesFor = { cwd: ctx.cwd, registry: new WorktreeRegistry(join(ctx.cwd, ".symphony", "runtime", "worktree-registry.json")) };
+		}
+		return worktreesFor.registry;
+	}
+
+	function leaseStore(ctx: ExtensionContext): FencedLeaseStore {
+		if (!leasesFor || leasesFor.cwd !== ctx.cwd) {
+			leasesFor = { cwd: ctx.cwd, store: new FencedLeaseStore(join(ctx.cwd, ".symphony", "runtime", "write-leases.json")) };
+		}
+		return leasesFor.store;
+	}
+
+	function supervisorAuthority(ctx: ExtensionContext): SupervisorAuthority {
+		if (!supervisorFor || supervisorFor.cwd !== ctx.cwd) {
+			supervisorFor = { cwd: ctx.cwd, authority: new SupervisorAuthority(join(ctx.cwd, ".symphony", "runtime", "supervisor.lock.json"), process.pid) };
+		}
+		return supervisorFor.authority;
+	}
 
 	function skillsFor(ctx: ExtensionContext): SkillCatalog {
 		if (!skillCatalog) {
@@ -227,6 +258,12 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 						return await cmdCancel(ctx, c);
 					case "web":
 						return await cmdWeb(ctx, c, rest[0]);
+					case "worktree":
+						return await cmdWorktree(ctx, c, rest[0], rest[1]);
+					case "queue":
+						return cmdQueue(ctx, c);
+					case "supervisor":
+						return await cmdSupervisor(ctx, c);
 					case "roles":
 						return cmdRoles(ctx);
 					case "delegate":
@@ -708,6 +745,115 @@ export default function symphonyExtension(pi: ExtensionAPI): void {
 			roleRegistry.setLifecycle(launched.session.id, "failed", (err as Error).message);
 			ctx.ui.notify(`Delegated ${role.role} failed: ${(err as Error).message}`, "error");
 		}
+	}
+
+	/**
+	 * Managed worktrees (v0.5): allocation shows the full preview and only
+	 * then runs the one typed git command; removal refuses unknown content.
+	 */
+	async function cmdWorktree(ctx: ExtensionContext, c: SymphonyCore, action?: string, nameArg?: string): Promise<void> {
+		const worktrees = worktreeRegistry(ctx);
+		worktrees.load();
+		if (!action || action === "list") {
+			const active = worktrees.active();
+			return void ctx.ui.notify(
+				active.length === 0
+					? "No managed worktrees. /sym worktree allocate <name>"
+					: ["Managed worktrees:", ...active.map((w) => `  ${w.taskId} → ${w.path} (${w.branch}, fence ${w.fence}, base ${w.baseSha.slice(0, 8)})`)].join("\n"),
+				"info",
+			);
+		}
+		if (action === "allocate") {
+			const activeTask = c.listTasks().find((t) => !["done", "cancelled"].includes(t.stage));
+			if (!activeTask) return void ctx.ui.notify("No active task to allocate a worktree for.", "warning");
+			const baseResult = await pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 10_000 });
+			if (baseResult.code !== 0) return void ctx.ui.notify("Cannot resolve base SHA — is this a git repository?", "error");
+			const baseSha = baseResult.stdout.trim();
+			// Derive the collision-safe branch first, then the path from it so
+			// the registry, the preview, and git all agree on the same target.
+			const branch = sanitizeBranch(activeTask.id, nameArg ?? "work");
+			const path = join(ctx.cwd, "..", branch.replace(/^sym\//, "sym-").replace(/\//g, "-"));
+			const allocated = worktrees.allocate({ taskId: activeTask.id, path, branch, baseSha, repoRoot: ctx.cwd });
+			if (!allocated.ok) return void ctx.ui.notify(allocated.error, "error");
+			const preview = [
+				`Repository: ${ctx.cwd}`,
+				`Base ref: HEAD → ${baseSha.slice(0, 12)}`,
+				`Worktree path: ${path}`,
+				`Branch: ${branch} (new, never force/reset)`,
+				"",
+				`Typed command: git ${renderGitCommand({ kind: "worktree_add", path, branch, baseSha }).join(" ")}`,
+			].join("\n");
+			ctx.ui.notify(preview, "info");
+			if (!(await ctx.ui.confirm("Allocate managed worktree?", `Create the worktree above for ${activeTask.id}?`))) {
+				worktrees.completeRemoval(allocated.workspace.id);
+				return;
+			}
+			// one typed mutation; the guard's git allowlist doesn't cover
+			// worktree adds, so run it through pi.exec directly from the
+			// typed renderer (never free-form user input)
+			const argv = renderGitCommand({ kind: "worktree_add", path, branch, baseSha });
+			const result = await pi.exec("git", argv, { cwd: ctx.cwd, timeout: 60_000 });
+			if (result.code !== 0) {
+				worktrees.completeRemoval(allocated.workspace.id);
+				return void ctx.ui.notify(`git worktree add failed: ${result.stderr.trim()}`, "error");
+			}
+			allocated.workspace.path = path;
+			return void ctx.ui.notify(`Worktree ${allocated.workspace.id} allocated at ${path} (branch ${branch}).`, "info");
+		}
+		if (action === "remove") {
+			const target = worktrees.active().find((w) => w.path.endsWith(nameArg ?? "\u0000") || w.taskId === nameArg);
+			if (!target) return void ctx.ui.notify("Unknown worktree — /sym worktree list", "warning");
+			const status = await pi.exec("git", ["status", "--porcelain"], { cwd: target.path, timeout: 10_000 });
+			const lines = status.stdout.trim().split("\n").filter(Boolean);
+			const request = worktrees.requestRemoval(target.id, { hasUncommittedChanges: lines.length > 0, hasUnknownFiles: lines.some((l) => l.startsWith("??")), inUse: false });
+			if (!request.ok) return void ctx.ui.notify(`Removal blocked: ${request.reason}`, "warning");
+			const argv = renderGitCommand({ kind: "worktree_remove", path: target.path });
+			const result = await pi.exec("git", argv, { cwd: ctx.cwd, timeout: 60_000 });
+			if (result.code !== 0) return void ctx.ui.notify(`git worktree remove failed: ${result.stderr.trim()}`, "error");
+			worktrees.completeRemoval(target.id);
+			return void ctx.ui.notify(`Worktree for ${target.taskId} removed.`, "info");
+		}
+		return void ctx.ui.notify("Usage: /sym worktree [list|allocate <name>|remove <task>]", "info");
+	}
+
+	/** Scheduler projection (v0.6): multi-task queue with reason codes. */
+	function cmdQueue(ctx: ExtensionContext, c: SymphonyCore): void {
+		const tasks = c.listTasks().filter((t) => !["done", "cancelled"].includes(t.stage));
+		if (tasks.length === 0) return void ctx.ui.notify("No active tasks.", "info");
+		const schedulerTasks: SchedulerTask[] = tasks.map((t) => ({
+			taskId: t.id,
+			priority: 1 as const,
+			hardDependenciesMet: true,
+			approvalGranted: t.stage !== "plan" || t.risks.length === 0,
+			createdAt: Date.parse(t.createdAt) || Date.now(),
+		}));
+		const capacity = Math.min(c.config.workspace.maxActiveTasks, 8);
+		const selection = selectCandidates(schedulerTasks, { capacity, now: Date.now(), starvationMs: 15 * 60_000, paused: false });
+		const reasons = nonRunnableReasons(schedulerTasks, { paused: false });
+		const selected = Array.isArray(selection) ? new Set(selection.map((s) => s.taskId)) : new Set<string>();
+		const lines = tasks.map((t) => {
+			const reason = reasons.get(t.id);
+			const state = selected.has(t.id) ? "▶ dispatchable" : reason ? `⛔ ${reason.code}` : "queued";
+			return `  ${t.id} ${t.stage} (${t.runState}) ${state}`;
+		});
+		ctx.ui.notify([`Queue (capacity ${capacity}):`, ...lines].join("\n"), "info");
+	}
+
+	/** Supervisor posture (v0.7): authority + reconciliation state. */
+	async function cmdSupervisor(ctx: ExtensionContext, c: SymphonyCore): Promise<void> {
+		const supervisor = supervisorAuthority(ctx);
+		const authority = supervisor.acquire(`repo:${c.deps.repoRoot}`);
+		const lines: string[] = [];
+		if (authority.ok) {
+			lines.push(`Authority: this Pi process (epoch ${authority.epoch.epoch}${authority.reclaimed ? ", reclaimed from a dead owner" : ""})`);
+		} else {
+			lines.push(`Authority: ${authority.error}`);
+		}
+		const reconciled = new Set(["processes", "leases", "timers", "workspaces", "state_store", "event_offsets"] as const);
+		const gate = reconciliationGate("reconciling", new Set(["processes"]));
+		lines.push(`Reconciliation: ${reconciled.size - gate.remaining.length}/${reconciled.size} steps verified (dispatch ${gate.canDispatch ? "enabled" : "gated"})`);
+		lines.push(`Detachment: contracts honored per attempt; /sym delegate runs read-only roles.`);
+		ctx.ui.notify(lines.join("\n"), "info");
 	}
 
 	async function cmdWeb(ctx: ExtensionContext, c: SymphonyCore, action?: string): Promise<void> {

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { isValidTaskId, monotonicId } from "./ids.ts";
-import { configHash, loadConfigFile, type SymphonyConfig } from "./config.ts";
+import { configHash, loadConfigFile, type ConfigIssue, type SymphonyConfig } from "./config.ts";
 import { EventLedger } from "./events.ts";
 import { LeaseManager } from "./lease.ts";
 import { symphonyPaths, taskFileName } from "./paths.ts";
@@ -19,10 +19,12 @@ import {
 } from "./tasks.ts";
 import {
 	assertTransition,
-	contractFor,
+	compileWorkflow,
+	defaultCompiledGraph,
 	evaluateGate,
 	nextAction,
 	needsPlanApproval,
+	type CompiledGraph,
 	type EvidenceBundle,
 } from "./workflow.ts";
 import { buildCheckEnv, persistCheckEvidence, runCheck, verifyCheckEvidenceDigest, type CommandExecutor } from "./checks.ts";
@@ -87,6 +89,7 @@ export class SymphonyCore {
 	config: SymphonyConfig;
 	configIssues: ReturnType<typeof loadConfigFile>["issues"];
 	private attempts = new Map<string, AttemptRecord>(); // key: `${taskId}#${attemptId}`
+	private workflowGraph: CompiledGraph | undefined;
 	private approvals = new Map<string, ApprovalRecord>();
 	private reports = new Map<string, Map<ManagedSection, StageReport>>(); // taskId → section → latest report
 	private planRevisions = new Map<string, number>();
@@ -101,6 +104,11 @@ export class SymphonyCore {
 		this.ledger = new EventLedger(this.paths.eventsFile);
 		this.lease = new LeaseManager(this.paths.leaseFile);
 		this.replay();
+		// Graph load is async (validates custom stages); the default graph is
+		// active immediately and the custom one replaces it once validated.
+		void this.loadWorkflowGraph().then((graph) => {
+			this.workflowGraph = graph;
+		});
 	}
 
 	get initialized(): boolean {
@@ -258,6 +266,76 @@ export class SymphonyCore {
 			});
 		}
 		return report;
+	}
+
+	/**
+	 * The ONLY sanctioned config mutation path (the web adapter routes here —
+	 * the HTTP layer never writes config files itself).
+	 */
+	async applyConfig(input: { draftYaml: string; expectedHash?: string }): Promise<CommandResult<{ backedUp?: string; issues: ConfigIssue[] }>> {
+		const { loadConfigFromText, validateCustomWorkflow } = await import("./config.ts");
+		const parsed = loadConfigFromText(input.draftYaml);
+		if (parsed.issues.length > 0) {
+			return { ok: false, error: "configuration is invalid", next: parsed.issues.map((i) => `${i.path}: ${i.message}`).join("; ") };
+		}
+		const candidate = parsed.config!;
+		if (candidate.customStages && candidate.customStages.length > 0) {
+			const graph = await validateCustomWorkflow(candidate.customStages, candidate.workflowInvariants ?? { requireDeterministicVerify: true, requireCompletionEvidence: true });
+			if (!graph.ok) {
+				return { ok: false, error: "workflow graph is invalid", next: graph.issues.map((i) => `${i.path}: ${i.message}`).join("; ") };
+			}
+		}
+		if (input.expectedHash !== undefined && input.expectedHash !== configHash(this.config)) {
+			return { ok: false, error: `revision conflict: configuration changed since the draft (now ${configHash(this.config).slice(0, 8)})`, next: "reload the configuration and re-edit" };
+		}
+		const backedUp = this.initialized ? backupFile(this.paths.config) : undefined;
+		const { writeFileSync, mkdirSync, renameSync } = await import("node:fs");
+		mkdirSync(join(this.paths.root), { recursive: true });
+		const tmp = `${this.paths.config}.tmp`;
+		writeFileSync(tmp, input.draftYaml, "utf8");
+		renameSync(tmp, this.paths.config);
+		// Reload: the next command sees the applied policy.
+		const reloaded = loadConfigFile(this.paths.config);
+		this.config = reloaded.config;
+		this.configIssues = reloaded.issues;
+		this.workflowGraph = await this.loadWorkflowGraph();
+		this.ledger.append("runtime", "config.applied", {
+			hash: configHash(this.config),
+			backedUp: backedUp ?? null,
+			version: this.config.version,
+		}, { aggregateRevision: 0 });
+		return { ok: true, value: { backedUp, issues: [] }, next: "configuration applied; active attempts keep their pinned policy" };
+	}
+
+	/** Compile the configured (or default) workflow into the engine's contract model. */
+	private async loadWorkflowGraph(): Promise<CompiledGraph> {
+		if (this.config.customStages && this.config.customStages.length > 0) {
+			const { validateCustomWorkflow } = await import("./config.ts");
+			const graph = await validateCustomWorkflow(this.config.customStages, this.config.workflowInvariants ?? { requireDeterministicVerify: true, requireCompletionEvidence: true });
+			if (graph.ok) {
+				const workflowDef = await import("./workflow-def.ts");
+				const stages = this.config.customStages.map((stage) => ({
+					id: stage.id,
+					actor: stage.actor,
+					inputs: stage.inputs,
+					outputs: stage.outputs,
+					onSuccess: stage.onSuccess,
+					onRejected: stage.onRejected,
+					onBlockingFindings: stage.onBlockingFindings,
+					requiresChecks: stage.requiresChecks,
+					requiresApproval: stage.requiresApproval,
+					terminal: stage.terminal,
+					purpose: stage.purpose,
+				}));
+				return compileWorkflow({ stages, invariants: { requireDeterministicVerify: true, requireCompletionEvidence: true } } as import("./workflow-def.ts").WorkflowDefinition);
+			}
+		}
+		return defaultCompiledGraph();
+	}
+
+	/** Active transition graph (custom when configured and valid, default otherwise). */
+	get activeGraph(): CompiledGraph {
+		return this.workflowGraph ?? defaultCompiledGraph();
 	}
 
 	// ---------------------------------------------------------------------------
@@ -555,7 +633,7 @@ export class SymphonyCore {
 		if (!task.ok) return { ok: false, error: task.error };
 		const from = task.value.frontmatter.stage;
 		if (from === to) return { ok: true, value: { stage: to } };
-		const contract = contractFor(from, to);
+		const contract = this.activeGraph.contractFor(from, to);
 		if (contract.requiresChecks) {
 			return {
 				ok: false,
