@@ -239,13 +239,22 @@ export function validateGraph(def: WorkflowDefinition): GraphIssue[] {
 	// Invariant enforcement (V03-WF-003): every path into done/ready must pass
 	// through a check-gated stage exit.
 	if (def.invariants.requireDeterministicVerify) {
-		const done = def.stages.find((s) => s.id === "done");
-		if (done) {
+		// The invariant covers EVERY completion gate: edges into `ready`
+		// (pre-integration verification) as well as `done` (post-integration).
+		// A custom graph that skips check-gating on either edge would let
+		// stale or missing evidence reach a completion state.
+		for (const [gateId, requiredKind] of [["ready", "verify"], ["done", "postIntegration"]] as const) {
+			const gate = def.stages.find((s) => s.id === gateId);
+			if (!gate) continue;
 			for (const stage of def.stages) {
-				if (targetsOf(stage).includes("done") && stage.requiresChecks === undefined) {
+				// Only the FORWARD (onSuccess) edge is the completion gate;
+				// rejection/repair edges (onRejected/onBlockingFindings) leave
+				// the stage without completing it and are not gated.
+				if (stage.onSuccess !== gateId) continue;
+				if (stage.requiresChecks !== requiredKind) {
 					issues.push({
 						stage: stage.id,
-						message: `invariant violation: ${stage.id} → done without requiresChecks (deterministic verification would be bypassable)`,
+						message: `invariant violation: ${stage.id} → ${gateId} requires requires_checks: ${requiredKind} (got ${stage.requiresChecks ?? "none"} — deterministic verification would be bypassable)`,
 					});
 				}
 			}

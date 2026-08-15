@@ -75,8 +75,11 @@ export function previewMigration(v1Yaml: string, repositoryRevision = 0): Migrat
  * backup path for explicit rollback. An interrupted apply leaves the original
  * untouched because the rename is atomic.
  */
-export function applyMigration(configPath: string, preview: MigrationPreview): { ok: true; backupPath: string } | { ok: false; error: string } {
+export function applyMigration(configPath: string, preview: Partial<MigrationPreview> | undefined): { ok: true; backupPath: string } | { ok: false; error: string } {
 	if (!existsSync(configPath)) return { ok: false, error: `configuration not found: ${configPath}` };
+	if (!preview || typeof preview.nextYaml !== "string" || preview.nextYaml.length === 0) {
+		return { ok: false, error: "invalid migration preview: call previewMigration() first" };
+	}
 	const backupPath = `${configPath}.v1-backup-${monotonicId()}`;
 	copyFileSync(configPath, backupPath);
 	const tmp = `${configPath}.tmp`;

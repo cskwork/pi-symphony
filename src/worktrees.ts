@@ -171,15 +171,22 @@ function isInside(candidate: string, root: string): boolean {
 	return candidate === root || candidate.startsWith(`${root}/`);
 }
 
-/** Deterministic, sanitized, collision-safe branch names (V05-WS-003). */
+/**
+ * Deterministic, sanitized, collision-safe branch names (V05-WS-003).
+ * Idempotent: an already-sanitized branch is returned unchanged, so callers
+ * that pre-sanitize (e.g. to derive the worktree path) and the registry's
+ * own allocation always agree on the same name.
+ */
 export function sanitizeBranch(taskId: string, raw: string): string {
+	const prefix = `sym/${taskId.toLowerCase()}/`;
+	if (raw.toLowerCase().startsWith(prefix)) return raw.slice(0, 80);
 	const suffix = raw
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "-")
 		.replace(/^-+|-+$/g, "")
 		.slice(0, 30);
 	const unique = monotonicId().toLowerCase().slice(-6);
-	return `sym/${taskId.toLowerCase()}/${suffix || "work"}-${unique}`.slice(0, 80);
+	return `${prefix}${suffix || "work"}-${unique}`.slice(0, 80);
 }
 
 // ---------------------------------------------------------------------------

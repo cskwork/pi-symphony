@@ -504,11 +504,15 @@ export function configHash(config: SymphonyConfig): string {
  * the core after schema validation so drafts fail before ever touching disk.
  */
 export async function validateCustomWorkflow(
-	stages: WorkflowStageConfig[],
-	invariants: { requireDeterministicVerify: boolean; requireCompletionEvidence: boolean },
+	stages: WorkflowStageConfig[] | undefined,
+	invariants: { requireDeterministicVerify: boolean; requireCompletionEvidence: boolean } | undefined,
 ): Promise<{ ok: true; issues: ConfigIssue[] } | { ok: false; issues: ConfigIssue[] }> {
 	const workflowDef = await import("./workflow-def.ts");
 	const issues: ConfigIssue[] = [];
+	if (!Array.isArray(stages) || stages.length === 0) {
+		return { ok: true, issues }; // no custom graph = default preset, nothing to validate
+	}
+	const invariantsSafe = invariants ?? { requireDeterministicVerify: true, requireCompletionEvidence: true };
 	const definitions = stages.map((stage) => {
 		let when;
 		if (stage.when !== undefined) {
@@ -540,8 +544,8 @@ export async function validateCustomWorkflow(
 	const graphIssues = workflowDef.validateGraph({
 		stages: definitions,
 		invariants: {
-			requireDeterministicVerify: invariants.requireDeterministicVerify,
-			requireCompletionEvidence: invariants.requireCompletionEvidence,
+			requireDeterministicVerify: invariantsSafe.requireDeterministicVerify,
+			requireCompletionEvidence: invariantsSafe.requireCompletionEvidence,
 		},
 	});
 	for (const issue of graphIssues) {

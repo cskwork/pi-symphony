@@ -73,7 +73,7 @@ describe("graph validation (V03-WF-002/003)", () => {
 		const postverify = bypass.stages.find((s) => s.id === "postverify")!;
 		delete (postverify as Partial<typeof postverify>).requiresChecks;
 		const issues = validateGraph(bypass);
-		expect(issues.some((i) => /invariant violation.*requiresChecks/.test(i.message))).toBe(true);
+		expect(issues.some((i) => /invariant violation.*postverify → done requires/.test(i.message))).toBe(true);
 	});
 });
 
