@@ -3,220 +3,370 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="description" content="Symphony for Pi — 증거 기반 소프트웨어 개발 워크플로 확장. Plan → Build → Review → Verify → Ready → Done." />
+<meta name="description" content="Symphony for Pi — 증거 기반 소프트웨어 개발 워크플로 확장. 에이전트가 완료했다고 말할 때, 증거가 확인해준다." />
 <title>Symphony for Pi</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎼</text></svg>" />
 <style>
+/* Canvas UI-inspired design language: neutral tokens, dashed dividers with
+   cross terminals, mono eyebrow labels, nested card frames, pill buttons. */
 :root {
-  --bg1: #0b1020; --bg2: #131a2e; --bg3: #1b2440;
-  --fg: #e8edf7; --dim: #9aa7c2; --accent: #7cb0ff; --accent2: #9d8cff;
-  --ok: #6fd3a0; --warn: #ecc56b; --err: #ef8a8a;
-  --card: rgba(255,255,255,0.055); --card-border: rgba(255,255,255,0.12);
-  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --bg: #fafafa; --bg2: #f4f4f5; --fg: #0a0a0a; --muted: #71717a; --muted2: #a1a1aa;
+  --border: rgba(10,10,10,0.12); --border2: rgba(10,10,10,0.2); --dash: rgba(10,10,10,0.28);
+  --card: #ffffff; --inner: #fafafa;
+  --accent: #4f46e5; --ok: #15803d; --warn: #b45309; --err: #b91c1c;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, "Segoe UI", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+}
+html.dark {
+  --bg: #0a0a0a; --bg2: #111113; --fg: #fafafa; --muted: #a1a1aa; --muted2: #71717a;
+  --border: rgba(250,250,250,0.12); --border2: rgba(250,250,250,0.22); --dash: rgba(250,250,250,0.3);
+  --card: #101012; --inner: #0d0d0f;
+  --accent: #818cf8; --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html { scroll-behavior: smooth; }
-body {
-  font: 16px/1.65 -apple-system, "Segoe UI", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
-  color: var(--fg);
-  background:
-    radial-gradient(1100px 600px at 12% -8%, rgba(124,176,255,0.16), transparent 60%),
-    radial-gradient(900px 520px at 88% 12%, rgba(157,140,255,0.13), transparent 60%),
-    radial-gradient(800px 600px at 50% 110%, rgba(111,211,160,0.08), transparent 60%),
-    linear-gradient(160deg, var(--bg1), var(--bg2) 55%, var(--bg3));
-  background-attachment: fixed;
-  min-height: 100vh;
-}
-.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+html, html.dark { color-scheme: light dark; }
+body { font: 16px/1.7 var(--sans); background: var(--bg); color: var(--fg);
+  -webkit-font-smoothing: antialiased; transition: background .25s, color .25s; }
+.wrap { max-width: 72rem; margin: 0 auto; padding: 0 1.5rem; }
+a { color: inherit; }
 
-/* Nav */
-nav {
-  position: sticky; top: 0; z-index: 50;
-  background: rgba(11,16,32,0.72); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-  border-bottom: 1px solid rgba(255,255,255,0.08);
-}
-nav .wrap { display: flex; align-items: center; gap: 18px; height: 60px; }
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: -0.2px; }
-.brand .dot { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; font-size: 15px;
-  background: linear-gradient(135deg, rgba(124,176,255,0.35), rgba(157,140,255,0.35)); border: 1px solid rgba(255,255,255,0.18); }
-nav .links { display: flex; gap: 16px; margin-left: auto; align-items: center; }
-nav a { color: var(--dim); text-decoration: none; font-size: 14px; transition: color .15s; }
-nav a:hover { color: var(--fg); }
-.lang { display: flex; border: 1px solid var(--card-border); border-radius: 8px; overflow: hidden; }
-.lang button { background: transparent; border: 0; color: var(--dim); padding: 5px 10px; font: 600 12px inherit; cursor: pointer; }
-.lang button.on { background: rgba(124,176,255,0.22); color: var(--fg); }
+/* ---------- header (canvasui style: fixed, blurred, pill nav) ---------- */
+header.site { position: fixed; inset: 0 0 auto 0; z-index: 60; border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 72%, transparent); backdrop-filter: blur(20px) saturate(1.5); -webkit-backdrop-filter: blur(20px) saturate(1.5); }
+header.site .wrap { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; height: 3.5rem; }
+.brand { display: flex; align-items: center; gap: .55rem; font-weight: 600; font-size: .95rem; letter-spacing: -0.02em; justify-self: start; text-decoration: none; }
+.brand .mark { width: 1.7rem; height: 1.7rem; border-radius: .5rem; display: grid; place-items: center; font-size: .95rem;
+  border: 1px solid var(--border2); background: var(--bg2); }
+nav.main { display: flex; gap: .25rem; justify-self: center; }
+nav.main a { padding: .4rem .9rem; border-radius: 999px; font-size: .875rem; color: var(--muted); text-decoration: none; transition: all .15s; }
+nav.main a:hover { background: var(--bg2); color: var(--fg); }
+.hact { display: flex; align-items: center; gap: .5rem; justify-self: end; }
+.iconbtn { width: 2rem; height: 2rem; display: grid; place-items: center; border-radius: 999px; border: 1px solid var(--border);
+  background: transparent; color: var(--muted); cursor: pointer; font-size: .8rem; transition: all .15s; }
+.iconbtn:hover { color: var(--fg); border-color: var(--border2); }
+.iconbtn.on { background: var(--bg2); color: var(--fg); }
+.langbtns { display: flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+.langbtns button { border: 0; background: transparent; color: var(--muted); font: 600 .7rem var(--mono); padding: .4rem .6rem; cursor: pointer; letter-spacing: .05em; }
+.langbtns button.on { background: var(--fg); color: var(--bg); }
+@media (max-width: 760px) { nav.main { display: none; } }
 
-/* Hero */
-header.hero { padding: 88px 0 64px; text-align: center; }
-.badge { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim);
-  border: 1px solid var(--card-border); border-radius: 999px; padding: 6px 14px; margin-bottom: 22px;
-  background: var(--card); backdrop-filter: blur(8px); }
-.badge .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); animation: pulse 2.2s infinite; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
-h1 { font-size: clamp(34px, 6vw, 56px); line-height: 1.12; letter-spacing: -1px; font-weight: 800; }
-h1 .grad { background: linear-gradient(100deg, var(--accent), var(--accent2) 70%); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.tagline { margin: 18px auto 0; max-width: 720px; color: var(--dim); font-size: clamp(16px, 2.4vw, 19px); }
-.cta { margin-top: 34px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
-.btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 22px; border-radius: 12px; font-weight: 650; font-size: 15px; text-decoration: none; transition: transform .12s, box-shadow .12s; }
-.btn:hover { transform: translateY(-1px); }
-.btn.primary { background: linear-gradient(120deg, #4d8dff, #7d6bff); color: #fff; box-shadow: 0 8px 28px rgba(93,120,255,0.35); }
-.btn.ghost { border: 1px solid var(--card-border); color: var(--fg); background: var(--card); backdrop-filter: blur(8px); }
-.btn code { font: 600 13px var(--mono); }
+/* ---------- canvasui dashed section divider with cross terminals ---------- */
+.divider { position: relative; border-top: 1px dashed var(--dash); height: 0; }
+.divider::before, .divider::after { content: ""; position: absolute; top: -5px; width: 9px; height: 9px; }
+.divider::before { left: -5px; background:
+  linear-gradient(var(--dash), var(--dash)) top/100% 1px no-repeat, linear-gradient(var(--dash), var(--dash)) center/1px 100% no-repeat; }
+.divider::after { right: -5px; background:
+  linear-gradient(var(--dash), var(--dash)) top/100% 1px no-repeat, linear-gradient(var(--dash), var(--dash)) center/1px 100% no-repeat; }
 
-/* Widget mock */
-.widget { margin: 46px auto 0; max-width: 640px; border: 1px solid var(--card-border); border-radius: 14px; overflow: hidden;
-  background: rgba(8,12,24,0.55); backdrop-filter: blur(10px); box-shadow: 0 24px 70px rgba(0,0,0,0.45); }
-.widget .bar { display: flex; gap: 6px; padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,0.07); }
-.widget .bar i { width: 11px; height: 11px; border-radius: 50%; background: rgba(255,255,255,0.14); }
-.widget pre { padding: 16px 18px; font: 13px/1.7 var(--mono); color: var(--dim); text-align: left; overflow-x: auto; }
-.widget pre b { color: var(--accent); font-weight: 700; }
-.widget pre em { color: var(--ok); font-style: normal; }
-.widget pre span.warn { color: var(--warn); }
+section { padding: 5.5rem 0; }
+.eyebrow { font: 500 .7rem var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--muted); }
+h2 { font-size: clamp(1.6rem, 3.2vw, 2.2rem); font-weight: 500; letter-spacing: -0.03em; line-height: 1.15; margin-top: .7rem; text-wrap: balance; }
+.lede { color: var(--muted); max-width: 40rem; margin-top: .9rem; font-size: 1.02rem; text-wrap: pretty; }
 
-/* Sections */
-section { padding: 64px 0; }
-h2 { font-size: clamp(24px, 3.6vw, 32px); letter-spacing: -0.5px; margin-bottom: 10px; }
-.sub { color: var(--dim); max-width: 640px; margin-bottom: 34px; }
-.grid { display: grid; gap: 16px; }
-.g2 { grid-template-columns: repeat(2, 1fr); }
-.g3 { grid-template-columns: repeat(3, 1fr); }
-@media (max-width: 860px) { .g3 { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 620px) { .g2, .g3 { grid-template-columns: 1fr; } }
-.card { border: 1px solid var(--card-border); border-radius: 16px; padding: 22px;
-  background: var(--card); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-  transition: border-color .15s, transform .15s; }
-.card:hover { border-color: rgba(124,176,255,0.4); transform: translateY(-2px); }
-.card h3 { font-size: 17px; margin-bottom: 8px; display: flex; align-items: center; gap: 9px; }
-.card p { color: var(--dim); font-size: 14.5px; }
-.card .ico { width: 34px; height: 34px; flex: none; border-radius: 10px; display: grid; place-items: center; font-size: 17px;
-  background: linear-gradient(135deg, rgba(124,176,255,0.22), rgba(157,140,255,0.22)); border: 1px solid rgba(255,255,255,0.14); }
+/* ---------- hero ---------- */
+.hero { padding: 8.5rem 0 4rem; display: grid; grid-template-columns: minmax(0,5fr) minmax(0,7fr); gap: 3rem; align-items: center; }
+@media (max-width: 900px) { .hero { grid-template-columns: 1fr; padding-top: 7rem; } }
+h1 { font-size: clamp(2rem, 4.6vw, 3.3rem); font-weight: 600; letter-spacing: -0.045em; line-height: 1.06; text-wrap: balance; }
+h1 .em { position: relative; white-space: nowrap; }
+h1 .em::after { content: ""; position: absolute; left: 0; right: 0; bottom: .08em; height: .38em; z-index: -1;
+  background: linear-gradient(90deg, rgba(99,102,241,.28), rgba(99,102,241,.12)); border-radius: 2px; }
+.hero p.sub { color: var(--muted); margin-top: 1.2rem; max-width: 34rem; font-size: 1.05rem; text-wrap: pretty; }
+.cta { display: flex; gap: .6rem; margin-top: 1.9rem; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: .5rem; height: 2.75rem; padding: 0 1.4rem; border-radius: 999px;
+  font-size: .9rem; font-weight: 500; text-decoration: none; transition: all .15s; }
+.btn.primary { background: var(--fg); color: var(--bg); }
+.btn.primary:hover { opacity: .85; }
+.btn.ghost { border: 1px solid var(--border2); color: var(--fg); }
+.btn.ghost:hover { background: var(--bg2); }
+.btn .ar { transition: transform .2s; } .btn:hover .ar { transform: translateX(2px); }
+.btn code { font: 600 .8rem var(--mono); }
+.hero .meta { margin-top: 2rem; display: flex; gap: 1.4rem; color: var(--muted); font: 500 .75rem var(--mono); letter-spacing: .04em; flex-wrap: wrap; }
+.hero .meta b { color: var(--fg); font-weight: 600; }
 
-/* Flow */
-.flow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
-.stage { padding: 8px 16px; border-radius: 10px; border: 1px solid var(--card-border); background: var(--card);
-  font: 600 13.5px var(--mono); color: var(--fg); backdrop-filter: blur(8px); }
-.stage.hot { border-color: rgba(124,176,255,0.55); color: var(--accent); box-shadow: 0 0 0 3px rgba(124,176,255,0.12); }
-.arrow { color: var(--dim); font-size: 15px; }
+/* terminal card (nested frames: outer solid, inner dashed like canvasui cards) */
+.term { border: 1px solid var(--border2); border-radius: 1rem; background: var(--card); overflow: hidden;
+  box-shadow: 0 24px 60px -18px rgba(0,0,0,0.25); }
+.term .bar { display: flex; align-items: center; gap: .4rem; padding: .7rem .9rem; border-bottom: 1px solid var(--border); background: var(--inner); }
+.term .bar i { width: .65rem; height: .65rem; border-radius: 50%; background: var(--border2); }
+.term .bar .ttl { margin-left: .5rem; font: 500 .7rem var(--mono); color: var(--muted); letter-spacing: .08em; }
+.term .body { padding: 1.1rem 1.2rem; font: .8rem/1.85 var(--mono); color: var(--muted); }
+.term .body .row { display: flex; gap: .8rem; }
+.term .body .p { color: var(--muted2); user-select: none; }
+.term .body .cmd { color: var(--fg); }
+.term .body .ok { color: var(--ok); } .term .body .st { color: var(--warn); } .term .body .ac { color: var(--accent); }
+.term .body .dim { color: var(--muted2); }
+.term .widget { margin-top: .9rem; border: 1px dashed var(--border2); border-radius: .7rem; padding: .75rem .9rem; background: var(--inner); }
+.term .widget b { color: var(--accent); font-weight: 600; }
 
-/* Rules (cannot-bypass) */
-.rules { display: grid; gap: 12px; }
-.rule { display: flex; gap: 14px; align-items: flex-start; padding: 16px 18px; border-radius: 14px;
-  border: 1px solid var(--card-border); background: var(--card); backdrop-filter: blur(10px); }
-.rule .lock { flex: none; width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
-  background: rgba(111,211,160,0.15); border: 1px solid rgba(111,211,160,0.3); color: var(--ok); font-size: 14px; }
-.rule b { display: block; font-size: 15px; margin-bottom: 3px; }
-.rule span { color: var(--dim); font-size: 14px; }
+/* ---------- how-it-works pipeline ---------- */
+.pipe { display: grid; grid-template-columns: repeat(7, 1fr); gap: .5rem; margin-top: 2.4rem; }
+@media (max-width: 900px) { .pipe { grid-template-columns: repeat(4, 1fr); } }
+@media (max-width: 560px) { .pipe { grid-template-columns: repeat(2, 1fr); } }
+.stage { border: 1px solid var(--border); border-radius: .9rem; padding: .8rem .6rem; text-align: center; background: var(--card); position: relative; }
+.stage .n { font: 600 .68rem var(--mono); color: var(--muted2); }
+.stage .t { font: 600 .78rem var(--mono); letter-spacing: .02em; margin-top: .25rem; }
+.stage .gate { font-size: .62rem; color: var(--muted); margin-top: .3rem; line-height: 1.3; }
+.stage.hot { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+.stage.hot .t { color: var(--accent); }
+.stage.manual { border-style: dashed; }
 
-/* Code block */
-pre.code { border: 1px solid var(--card-border); border-radius: 14px; background: rgba(8,12,24,0.6);
-  backdrop-filter: blur(10px); padding: 20px 22px; overflow-x: auto; font: 13.5px/1.75 var(--mono); color: #cdd8ee; }
-pre.code .c { color: #5c6b8c; } pre.code .k { color: var(--accent); } pre.code .s { color: #9fd6ae; }
-.cmd { display: flex; gap: 10px; align-items: center; padding: 13px 18px; border-radius: 12px; margin-top: 10px;
-  border: 1px solid var(--card-border); background: rgba(8,12,24,0.6); font: 14px var(--mono); }
-.cmd .sig { color: var(--ok); margin-right: 2px; }
-.cmd .note { margin-left: auto; color: var(--dim); font-size: 12.5px; font-family: inherit; }
+/* ---------- walkthrough ---------- */
+.steps { display: grid; gap: 1rem; margin-top: 2.4rem; }
+.step { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 1.1rem; padding: 1.35rem 1.4rem;
+  border: 1px solid var(--border); border-radius: 1.1rem; background: var(--card); }
+.step .num { font: 600 .75rem var(--mono); color: var(--bg); background: var(--fg); border-radius: .6rem;
+  width: 2.1rem; height: 2.1rem; display: grid; place-items: center; }
+.step h3 { font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; }
+.step h3 code { font: 600 .78rem var(--mono); color: var(--accent); }
+.step p { color: var(--muted); font-size: .92rem; margin-top: .35rem; max-width: 46rem; }
+.step .detail { margin-top: .7rem; border: 1px dashed var(--border2); border-radius: .7rem; background: var(--inner); padding: .7rem .9rem;
+  font: .78rem/1.7 var(--mono); color: var(--muted); overflow-x: auto; }
+.step .detail b { color: var(--fg); font-weight: 600; }
 
-/* Footer */
-footer { border-top: 1px solid rgba(255,255,255,0.08); padding: 36px 0 48px; color: var(--dim); font-size: 14px; }
-footer .wrap { display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; }
-footer a { color: var(--dim); }
-.stat { text-align: center; color: var(--dim); font-size: 13.5px; margin-top: 26px; }
+/* ---------- rules / architecture ---------- */
+.g2 { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 1rem; margin-top: 2.4rem; }
+@media (max-width: 820px) { .g2 { grid-template-columns: 1fr; } }
+.g3 { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 1rem; margin-top: 2.4rem; }
+@media (max-width: 900px) { .g3 { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+@media (max-width: 580px) { .g3 { grid-template-columns: 1fr; } }
+.card { border: 1px solid var(--border); border-radius: 1.1rem; background: var(--card); padding: 1.25rem; }
+.card .inner { border: 1px dashed var(--border2); border-radius: .8rem; background: var(--inner); padding: 1rem; height: 100%; }
+.card h3 { font-size: .95rem; font-weight: 600; letter-spacing: -0.01em; display: flex; align-items: center; gap: .5rem; }
+.card h3 .ic { font-size: 1rem; }
+.card p { color: var(--muted); font-size: .87rem; margin-top: .5rem; }
+.card .tagline { font: 500 .68rem var(--mono); color: var(--muted2); letter-spacing: .1em; text-transform: uppercase; }
+
+.rule { display: grid; grid-template-columns: auto minmax(0,1fr); gap: .9rem; align-items: start; }
+.rule .lock { font-size: .9rem; color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--err) 25%, transparent); width: 2rem; height: 2rem; border-radius: .6rem; display: grid; place-items: center; }
+.rule b { font-size: .92rem; font-weight: 600; display: block; }
+.rule span { color: var(--muted); font-size: .85rem; display: block; margin-top: .2rem; }
+
+/* architecture diagram */
+.arch { margin-top: 2.4rem; border: 1px solid var(--border); border-radius: 1.1rem; background: var(--card); padding: 1.5rem; overflow-x: auto; }
+.arch .flow { display: flex; align-items: center; gap: .55rem; min-width: 640px; flex-wrap: nowrap; }
+.arch .node { border: 1px solid var(--border2); border-radius: .75rem; padding: .55rem .85rem; font: 500 .72rem var(--mono); white-space: nowrap; background: var(--inner); }
+.arch .node.core { background: var(--fg); color: var(--bg); border-color: var(--fg); font-weight: 600; }
+.arch .node.gate { border-color: var(--ok); color: var(--ok); }
+.arch .arr { color: var(--muted2); font-size: .8rem; }
+.arch .caption { font: 400 .75rem/1.6 var(--mono); color: var(--muted); margin-top: 1rem; max-width: 52rem; }
+.arch .caption b { color: var(--fg); }
+
+/* code / install */
+pre.code { margin-top: 2rem; border: 1px solid var(--border2); border-radius: 1rem; background: var(--card); padding: 1.2rem 1.3rem;
+  font: .82rem/1.8 var(--mono); overflow-x: auto; }
+pre.code .c { color: var(--muted2); } pre.code .k { color: var(--accent); } pre.code .s { color: var(--ok); }
+.cmdline { display: flex; align-items: center; gap: .7rem; margin-top: .9rem; border: 1px solid var(--border2); border-radius: .8rem;
+  background: var(--card); padding: .8rem 1rem; font: .85rem var(--mono); cursor: pointer; transition: border-color .15s; }
+.cmdline:hover { border-color: var(--accent); }
+.cmdline .ps { color: var(--ok); } .cmdline .hint { margin-left: auto; color: var(--muted2); font-size: .7rem; }
+
+/* footer */
+footer { border-top: 1px solid var(--border); padding: 2.2rem 0 3rem; margin-top: 4rem; }
+footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; color: var(--muted); font-size: .85rem; }
+footer a { text-decoration: none; } footer a:hover { color: var(--fg); }
+.stat { text-align: center; padding: 1.8rem 0 0; color: var(--muted2); font: 500 .75rem var(--mono); letter-spacing: .04em; }
 .stat b { color: var(--fg); }
+
+/* reveal on scroll (respects reduced motion) */
+.reveal { opacity: 0; transform: translateY(14px); transition: opacity .5s ease, transform .5s cubic-bezier(0.23,1,0.32,1); }
+.reveal.in { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) { .reveal { opacity: 1; transform: none; transition: none; } .btn .ar, .btn:hover .ar { transform: none; } }
 </style>
 </head>
 <body>
 
-<nav>
+<header class="site">
   <div class="wrap">
-    <div class="brand"><span class="dot">🎼</span>Symphony <span style="color:var(--dim);font-weight:500">for Pi</span></div>
-    <div class="links">
-      <a href="#features" data-i18n="navFeatures">기능</a>
-      <a href="#workflow" data-i18n="navWorkflow">워크플로</a>
+    <a class="brand" href="#top"><span class="mark">🎼</span>Symphony<span style="color:var(--muted);font-weight:400">&nbsp;for Pi</span></a>
+    <nav class="main">
+      <a href="#how" data-i18n="navHow">작동 방식</a>
+      <a href="#walkthrough" data-i18n="navWalk">사용 흐름</a>
+      <a href="#rules" data-i18n="navRules">보장</a>
       <a href="#install" data-i18n="navInstall">설치</a>
-      <a href="https://github.com/cskwork/pi-symphony" target="_blank" rel="noopener">GitHub ↗</a>
-      <div class="lang"><button id="btnKo" class="on">KO</button><button id="btnEn">EN</button></div>
-    </div>
-  </div>
-</nav>
-
-<header class="hero">
-  <div class="wrap">
-    <div class="badge"><span class="pulse"></span><span data-i18n="badge">v1.0.1 · 10개 버전 · 4차례 적대적 리뷰 통과</span></div>
-    <h1><span data-i18n="heroA">에이전트가</span> <span class="grad" data-i18n="heroB">완료했다고 말할 때,</span><br /><span data-i18n="heroC">증거가</span> <span class="grad" data-i18n="heroD">확인해준다</span></h1>
-    <p class="tagline" data-i18n="tagline">Pi 코딩 에이전트를 위한 증거 기반 개발 워크플로. 플랜·구현·독립 리뷰·결정론적 검증·통합까지 — 모든 단계가 검증 가능한 증거와 함께 기록되고, 모델은 그 게이트를 우회할 수 없습니다.</p>
-    <div class="cta">
-      <a class="btn primary" href="#install"><span data-i18n="ctaInstall">설치하기</span> <code>pi install</code></a>
-      <a class="btn ghost" href="https://github.com/cskwork/pi-symphony" target="_blank" rel="noopener"><span data-i18n="ctaSource">소스 보기</span> ↗</a>
-    </div>
-    <div class="widget">
-      <div class="bar"><i></i><i></i><i></i></div>
-      <pre><b>SYMPHONY</b>  DEV-014 · BUILD · <em>●</em> running
-Fix pagination race · AC 2/3 · <span class="warn">checks not run</span></pre>
+    </nav>
+    <div class="hact">
+      <button class="iconbtn" id="themeBtn" aria-label="theme">◐</button>
+      <a class="iconbtn" href="https://github.com/cskwork/pi-symphony" target="_blank" rel="noopener" aria-label="GitHub" style="text-decoration:none">⌥</a>
+      <div class="langbtns"><button id="btnKo" class="on">KO</button><button id="btnEn">EN</button></div>
     </div>
   </div>
 </header>
 
-<section id="features">
-  <div class="wrap">
-    <h2 data-i18n="featuresH">증거가 상태를 소유한다</h2>
-    <p class="sub" data-i18n="featuresSub">에이전트가 "다 했어"라고 선언하는 것과, 검증 가능한 사실은 다릅니다. Symphony는 후자만 믿습니다.</p>
-    <div class="grid g3">
-      <div class="card"><h3><span class="ico">🧭</span><span data-i18n="f1T">하나의 액션 워크플로</span></h3><p data-i18n="f1D">/sym continue 하나가 다음 유효 단계를 진행합니다. 플랜 브리프 주입, fresh 리뷰어 실행, 필수 체크 수행, 승인 요청 중 현재 상태에 맞는 것을 자동 선택.</p></div>
-      <div class="card"><h3><span class="ico">🔍</span><span data-i18n="f2T">독립 리뷰</span></h3><p data-i18n="f2D">리뷰는 구현자 트랜스크립트를 절대 받지 않는 fresh 세션에서 실행됩니다. 읽기 전용 도구, 경계된 매니페스트, 턴 상한. 구현자 세션의 자체 리뷰는 엔진 차원에서 거부됩니다.</p></div>
-      <div class="card"><h3><span class="ico">🔒</span><span data-i18n="f3T">우회 불가능한 게이트</span></h3><p data-i18n="f3D">실패·타임아웃·stale한 필수 체크는 Ready와 Done을 봉쇄합니다. 검증은 결정론적 증거 위에서만 판정되고, 모델 리포트가 이를 뒤집을 수 없습니다.</p></div>
-      <div class="card"><h3><span class="ico">🛡️</span><span data-i18n="f4T">증거 무결성</span></h3><p data-i18n="f4D">체크 아티팩트는 sha256로 원장에 바인딩됩니다. 변조되면 broken으로 강등되어 게이트가 막힙니다. 작업 파일과 원장 불일치는 적발되어 보고됩니다.</p></div>
-      <div class="card"><h3><span class="ico">🔄</span><span data-i18n="f5T">크래시 세이프 복구</span></h3><p data-i18n="f5D">어느 시점에서 죽어도 재시작은 진행 중 시도를 Interrupted로 표시합니다. 자동 재개 없음, 중복 실행 없음, 거짓 완료 없음. Resume과 Retry도 구분됩니다.</p></div>
-      <div class="card"><h3><span class="ico">🌐</span><span data-i18n="f6T">동기화된 로컬 웹 UI</span></h3><p data-i18n="f6D">/sym web으로 loopback 전용 컨트롤 플레인을 띄웁니다. SSE 실시간 동기화, 설정 draft→diff→apply, 토큰 인증. 터미널과 브라우저가 같은 명령 서비스를 공유합니다.</p></div>
-    </div>
-  </div>
-</section>
+<main id="top">
 
-<section id="workflow">
-  <div class="wrap">
-    <h2 data-i18n="flowH">워크플로</h2>
-    <p class="sub" data-i18n="flowSub">수동 통합을 제외한 모든 단계가 증거와 계약으로 게이트됩니다.</p>
-    <div class="card" style="padding:26px">
-      <div class="flow">
-        <span class="stage">BACKLOG</span><span class="arrow">→</span>
-        <span class="stage">PLAN</span><span class="arrow">→</span>
-        <span class="stage">BUILD</span><span class="arrow">→</span>
-        <span class="stage">REVIEW</span><span class="arrow">→</span>
-        <span class="stage">VERIFY</span><span class="arrow">→</span>
-        <span class="stage hot">READY</span><span class="arrow">→</span>
-        <span class="stage">POST-VERIFY</span><span class="arrow">→</span>
-        <span class="stage hot">DONE</span>
+<!-- HERO -->
+<div class="wrap">
+  <div class="hero">
+    <div>
+      <p class="eyebrow" data-i18n="heroEyebrow">PI 확장 · EVIDENCE-BASED WORKFLOW</p>
+      <h1><span data-i18n="heroA">에이전트가</span> <span class="em" data-i18n="heroB">"다 했어"</span><br /><span data-i18n="heroC">라고 말할 때,</span> <span class="em" data-i18n="heroD">증거가 답한다</span></h1>
+      <p class="sub" data-i18n="heroSub">Symphony는 Pi 안에서 작업을 Plan → Build → Review → Verify → Ready → Done으로 끌고 가는 워크플로 엔진입니다. 각 단계는 검증 가능한 증거로만 통과되고, 그 게이트는 모델이 우회할 수 없습니다.</p>
+      <div class="cta">
+        <a class="btn primary" href="#install"><span data-i18n="ctaInstall">설치</span> <code>pi install</code> <span class="ar">→</span></a>
+        <a class="btn ghost" href="https://github.com/cskwork/pi-symphony" target="_blank" rel="noopener">GitHub ↗</a>
+      </div>
+      <div class="meta">
+        <span><b>v1.0.1</b> · <span data-i18n="metaTested">4차례 적대적 리뷰</span></span>
+        <span><b>321</b> tests · <b>36</b> suites</span>
+        <span><b data-i18n="metaFree">MIT</b></span>
       </div>
     </div>
-    <div class="rules" style="margin-top:18px">
-      <div class="rule"><div class="lock">⛔</div><div><b data-i18n="r1T">리뷰 provenance는 협상 불가</b><span data-i18n="r1D">구현자 세션이 제출한 리뷰는 절대 검증 게이트를 통과할 수 없습니다. fresh 리뷰어 세션 또는 기록된 인간 승인만 유효합니다.</span></div></div>
-      <div class="rule"><div class="lock">⛔</div><div><b data-i18n="r2T">changes_requested는 진짜로 막힌다</b><span data-i18n="r2D">리뷰어가 수정 요청을 내면 엔진이 review→verify 전환을 거부합니다. TUI가 아니라 엔진이 강제합니다.</span></div></div>
-      <div class="rule"><div class="lock">⛔</div><div><b data-i18n="r3T">커스텀 워크플로도 불변식을 지킨다</b><span data-i18n="r3D">v2 그래프로 스테이지를 자유롭게 추가해도, Done으로 가는 모든 경로에서 결정론적 검증과 완료 증거가 강제됩니다.</span></div></div>
-      <div class="rule"><div class="lock">⛔</div><div><b data-i18n="r4T">위임 역할은 읽기 전용</b><span data-i18n="r4D">scout·architect·security reviewer 등 위임 세션은 쓰기 도구를 가질 수 없습니다. 결과는 해시로 검증된 핸드오프로만 돌아옵니다.</span></div></div>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><span class="ttl">pi · /sym</span></div>
+      <div class="body">
+        <div class="row"><span class="p">›</span><span class="cmd">/sym continue</span></div>
+        <div class="row"><span class="p"></span><span><span class="ac">PLAN</span> <span class="dim">→</span> <span class="ac">BUILD</span> <span class="dim">→</span> <span class="st">REVIEW</span> <span class="dim">(fresh session…)</span></span></div>
+        <div class="row"><span class="p"></span><span class="ok">✓</span><span class="dim">review: approved · </span><span class="ok">2</span><span class="dim"> findings</span></div>
+        <div class="row"><span class="p"></span><span class="ok">✓</span><span class="dim">unit: passed · exit 0 · 1.2s · rev 4f2c9a1</span></div>
+        <div class="row"><span class="p"></span><span><span class="ac">VERIFY</span> <span class="dim">→</span> <span class="ac">READY</span></span></div>
+        <div class="widget"><b>SYMPHONY</b> DEV-014 · READY · ○ idle<br />Add rate limiter · AC 3/3 · <span style="color:var(--ok)">checks green</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- HOW IT WORKS -->
+<section id="how">
+  <div class="wrap">
+    <p class="eyebrow" data-i18n="howEyebrow">HOW IT WORKS</p>
+    <h2 data-i18n="howH">증거 기반 파이프라인</h2>
+    <p class="lede" data-i18n="howSub">각 스테이지는 산출물(report)을 요구하고, 각 화살표는 계약(contract)을 검사합니다. 계약이 충족되지 않으면 엔진이 전환을 거부합니다 — 모델의 선언이 아니라 증거가 상태를 바꿉니다.</p>
+    <div class="pipe">
+      <div class="stage"><div class="n">01</div><div class="t">PLAN</div><div class="gate" data-i18n="gPlan">plan_report<br />+ 승인(리스크 시)</div></div>
+      <div class="stage"><div class="n">02</div><div class="t">BUILD</div><div class="gate" data-i18n="gBuild">impl_report</div></div>
+      <div class="stage hot"><div class="n">03</div><div class="t">REVIEW</div><div class="gate" data-i18n="gReview">fresh 세션<br />approved</div></div>
+      <div class="stage hot"><div class="n">04</div><div class="t">VERIFY</div><div class="gate" data-i18n="gVerify">checks passed<br />@ HEAD</div></div>
+      <div class="stage"><div class="n">05</div><div class="t">READY</div><div class="gate" data-i18n="gReady">통합 대기</div></div>
+      <div class="stage manual"><div class="n">06</div><div class="t" data-i18n="gManualT">MERGE</div><div class="gate" data-i18n="gManual">직접 머지<br />(자동화 없음)</div></div>
+      <div class="stage"><div class="n">07</div><div class="t">DONE</div><div class="gate" data-i18n="gDone">post-checks<br />@ 통합 리비전</div></div>
+    </div>
+
+    <div class="arch reveal">
+      <div class="flow">
+        <span class="node">/sym · TUI</span><span class="arr">→</span>
+        <span class="node">Web UI · SSE</span><span class="arr">→</span>
+        <span class="node core">SymphonyCore</span><span class="arr">→</span>
+        <span class="node gate">검증 게이트</span><span class="arr">→</span>
+        <span class="node">tasks/*.md + evidence/ + events.jsonl</span>
+      </div>
+      <p class="caption" data-i18n="archCap"><b>단일 변경 경로:</b> 터미널과 브라우저 어디서 조작해도 모든 변경은 SymphonyCore 하나를 통과합니다. 상태는 마크다운 작업 파일 + 증거 아티팩트 + append-only 이벤트 원장에 기록되고, 어느 시점에서 죽어도 재시작이 그대로 복원합니다. 리뷰어는 fresh 세션으로 실행되어 구현자의 대화를 절대 받지 않습니다.</p>
     </div>
   </div>
 </section>
 
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- WALKTHROUGH -->
+<section id="walkthrough">
+  <div class="wrap">
+    <p class="eyebrow" data-i18n="walkEyebrow">WALKTHROUGH</p>
+    <h2 data-i18n="walkH">실제 사용 흐름</h2>
+    <p class="lede" data-i18n="walkSub">기억할 명령은 하나뿐입니다. /sym continue는 현재 상태를 보고 다음 유효 단계를 실행합니다.</p>
+    <div class="steps">
+      <div class="step reveal"><div class="num">1</div><div>
+        <h3><span data-i18n="w1T">초기화</span> <code>/sym init</code></h3>
+        <p data-i18n="w1D">저장소를 읽고(스크립트 실행 없이) 체크 명령을 제안하고 .symphony/를 만듭니다. config.yaml은 커밋되고, evidence와 runtime은 gitignore됩니다.</p>
+        <div class="detail"><span data-i18n="w1DetailPre">제안 화면:</span>
+.symphony/
+├── config.yaml        <span data-i18n="w1Detail1">체크·정책 (커밋됨)</span>
+├── tasks/DEV-001.md   <span data-i18n="w1Detail2">작업 = 사람이 읽는 마크다운</span>
+├── evidence/DEV-001/  <span data-i18n="w1Detail3">체크·리뷰·통합 아티팩트</span>
+└── runtime/           <span data-i18n="w1Detail4">이벤트 원장·리스 (자동 복구)</span></div>
+      </div></div>
+      <div class="step reveal"><div class="num">2</div><div>
+        <h3><span data-i18n="w2T">작업 생성</span> <code>/sym new</code></h3>
+        <p data-i18n="w2D">제목, 종류, 인수기준(acceptance criteria), 리스크를 입력합니다. 리스크를 선언하면 플랜 승인이 필수가 됩니다 — 플랜 도중 새 리스크가 발견되면 그때 승인이 요구됩니다.</p>
+      </div></div>
+      <div class="step reveal"><div class="num">3</div><div>
+        <h3><span data-i18n="w3T">진행</span> <code>/sym continue</code></h3>
+        <p data-i18n="w3D">플랜 단계면 브리프를 주입하고, 빌드 단계면 구현 브리프를 주입하고, 리뷰 단계면 fresh 리뷰어를 띄우고, 검증 단계면 필수 체크를 실행합니다. 모델은 sym_plan_submit / sym_build_report로 구조화된 리포트만 제출합니다 — 전환은 엔진이 결정합니다.</p>
+      </div></div>
+      <div class="step reveal"><div class="num">4</div><div>
+        <h3><span data-i18n="w4T">독립 리뷰</span> <span class="tagline" style="display:inline">FRESH SESSION</span></h3>
+        <p data-i18n="w4D">리뷰어는 새 Pi 세션에서 시작해 작업 계약·플랜·diff·리포트만 받습니다(구현자 트랜스크립트 제외). 도구는 읽기 전용, 턴 상한 존재. changes_requested를 내면 엔진이 다음 단계를 거부합니다 — TUI가 아니라 엔진이요.</p>
+      </div></div>
+      <div class="step reveal"><div class="num">5</div><div>
+        <h3><span data-i18n="w5T">검증과 통합</span> <code>/sym complete</code></h3>
+        <p data-i18n="w5D">필수 체크가 현재 HEAD에서 통과해야 READY가 됩니다. 직접 머지한 뒤 통합 리비전을 기록하면, Symphony가 그 커밋이 타깃 브랜치에 있는지 확인하고 통합 리비전 기준으로 체크를 재실행합니다. 모두 통과해야 DONE입니다.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- RULES -->
+<section id="rules">
+  <div class="wrap">
+    <p class="eyebrow" data-i18n="rulesEyebrow">GUARANTEES</p>
+    <h2 data-i18n="rulesH">엔진이 강제하는 것들</h2>
+    <p class="lede" data-i18n="rulesSub">이 규칙들은 문서가 아니라 코드입니다. 각 항목은 회귀 테스트로 고정되어 있습니다.</p>
+    <div class="g2">
+      <div class="card reveal"><div class="inner rule"><div class="lock">⛔</div><div>
+        <b data-i18n="r1T">자기 리뷰 통과 불가</b>
+        <span data-i18n="r1D">구현자 세션이 제출한 리뷰는 provenance에서 거부됩니다. fresh 리뷰어 세션 또는 기록된 인간 승인만 유효하고, changes_requested는 엔진이 실제로 막습니다.</span>
+      </div></div></div>
+      <div class="card reveal"><div class="inner rule"><div class="lock">⛔</div><div>
+        <b data-i18n="r2T">실패한 체크 = 완료 봉쇄</b>
+        <span data-i18n="r2D">실패·타임아웃·stale(다른 리비전에서 실행)·broken(아티팩트 변조) 체크는 READY와 DONE을 막습니다. 모델 리포트가 이를 뒤집을 수 없습니다.</span>
+      </div></div></div>
+      <div class="card reveal"><div class="inner rule"><div class="lock">⛔</div><div>
+        <b data-i18n="r3T">증거 위조 감지</b>
+        <span data-i18n="r3D">체크 아티팩트는 sha256로 이벤트 원장에 바인딩됩니다. 누군가 파일을 고쳐도 재시작 시 broken으로 강등되어 게이트가 막힙니다. 작업 파일과 원장의 불일치도 적발됩니다.</span>
+      </div></div></div>
+      <div class="card reveal"><div class="inner rule"><div class="lock">⛔</div><div>
+        <b data-i18n="r4T">커스텀 워크플로도 안전</b>
+        <span data-i18n="r4D">v2 그래프로 스테이지를 마음대로 추가해도, DONE으로 가는 모든 앞선 경로는 결정론적 검증 없이는 거부됩니다. 시큐리티 리뷰 스테이지 추가는 되도, 검증 우회는 안 됩니다.</span>
+      </div></div></div>
+    </div>
+
+    <div class="g3">
+      <div class="card reveal"><div class="inner">
+        <h3><span class="ic">🧭</span><span data-i18n="f1T">위임 = 읽기 전용</span></h3>
+        <p data-i18n="f1D">scout·architect·security reviewer 등 위임 역할은 쓰기 도구를 받지 못하고, 결과는 해시로 검증된 핸드오프로만 돌아옵니다.</p>
+      </div></div>
+      <div class="card reveal"><div class="inner">
+        <h3><span class="ic">🔄</span><span data-i18n="f2T">크래시 세이프</span></h3>
+        <p data-i18n="f2D">어느 시점에서 죽어도 재시작은 진행 중 시도를 Interrupted로 표시합니다. 자동 재개·중복 실행·거짓 완료가 없습니다.</p>
+      </div></div>
+      <div class="card reveal"><div class="inner">
+        <h3><span class="ic">🛡️</span><span data-i18n="f3T">사람 메모 보존</span></h3>
+        <p data-i18n="f3D">작업 파일의 관리 마커 밖에 쓴 인간 메모는 기계 쓰기가 반복돼도 바이트 단위로 보존됩니다.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- INSTALL -->
 <section id="install">
   <div class="wrap">
-    <h2 data-i18n="installH">설치 & 사용</h2>
-    <p class="sub" data-i18n="installSub">저장소에 확장을 설치하고, 그 안에서 /sym으로 시작합니다. 프로젝트 스크립트는 실행되지 않습니다.</p>
-    <pre class="code"><span class="c"># 설치</span>
+    <p class="eyebrow" data-i18n="instEyebrow">INSTALL</p>
+    <h2 data-i18n="instH">한 줄 설치</h2>
+    <p class="lede" data-i18n="instSub">Pi 0.84+ · Node 22+ · git 2.30+. 설치 후 어떤 저장소에서든 /sym으로 시작합니다.</p>
+    <pre class="code"><span class="c"># GitHub에서 설치</span>
 pi install github:cskwork/pi-symphony
 
 <span class="c"># 저장소 안에서</span>
-/sym init          <span class="c"># 체크 제안 확인 후 .symphony/ 생성</span>
-/sym new           <span class="c"># 인수기준 + 리스크로 작업 생성</span>
-/sym continue      <span class="c"># 다음 단계로</span>
-/sym web           <span class="c"># 브라우저 컨트롤 플레인</span></pre>
-    <div class="cmd"><span class="sig">$</span>pi install github:cskwork/pi-symphony<span class="note" data-i18n="installNote">Pi 확장 · Node 22+ · git 2.30+</span></div>
+/sym init      <span class="c"># <span data-i18n="inst1">체크 제안 확인 → .symphony/ 생성</span></span>
+/sym new       <span class="c"># <span data-i18n="inst2">인수기준 + 리스크로 작업 생성</span></span>
+/sym continue  <span class="c"># <span data-i18n="inst3">다음 단계로 (기억할 명령은 이것 하나)</span></span>
+/sym web       <span class="c"># <span data-i18n="inst4">브라우저 컨트롤 플레인 (loopback)</span></span></pre>
+    <div class="cmdline" id="copyCmd" role="button" tabindex="0"><span class="ps">$</span>pi install github:cskwork/pi-symphony<span class="hint" data-i18n="copy">클릭하여 복사</span></div>
+    <p class="stat" data-i18n="statLine">v1.0.1 · <b>321</b> tests · <b>36</b> suites · tsc clean · real-pi smoke <b>5/5</b> · <b>4</b>차례 적대적 리뷰 · 모든 확정 findings 수정 + 회귀 테스트</p>
   </div>
 </section>
 
-<div class="stat" data-i18n="stat">v1.0.1 · <b>321</b> tests · <b>36</b> suites · tsc clean · 실-pi smoke <b>5/5</b> · <b>4</b>차례 적대적 리뷰 · 모든 확정 findings 수정 + 회귀 테스트</div>
+</main>
 
 <footer>
   <div class="wrap">
-    <div>🎼 <b>Symphony for Pi</b> — <span data-i18n="footNote">샌드박스가 아닙니다: 사용자 권한으로 실행되며, 보호는 정책과 확인입니다.</span></div>
+    <div>🎼 <b>Symphony for Pi</b> — <span data-i18n="footNote">샌드박스가 아닙니다: 사용자 권한으로 실행되며 보호는 정책과 확인입니다. 자동 프로덕션 배포 없음.</span></div>
     <div><a href="https://github.com/cskwork/pi-symphony">GitHub</a> · <a href="https://github.com/cskwork/pi-symphony/blob/main/docs/security.md">Security</a> · <a href="https://github.com/cskwork/pi-symphony/blob/main/docs/threat-model.md">Threat Model</a> · MIT</div>
   </div>
 </footer>
@@ -224,60 +374,78 @@ pi install github:cskwork/pi-symphony
 <script>
 const I18N = {
   ko: {
-    navFeatures: "기능", navWorkflow: "워크플로", navInstall: "설치",
-    badge: "v1.0.1 · 10개 버전 · 4차례 적대적 리뷰 통과",
-    heroA: "에이전트가", heroB: "완료했다고 말할 때,", heroC: "증거가", heroD: "확인해준다",
-    tagline: "Pi 코딩 에이전트를 위한 증거 기반 개발 워크플로. 플랜·구현·독립 리뷰·결정론적 검증·통합까지 — 모든 단계가 검증 가능한 증거와 함께 기록되고, 모델은 그 게이트를 우회할 수 없습니다.",
-    ctaInstall: "설치하기", ctaSource: "소스 보기",
-    featuresH: "증거가 상태를 소유한다",
-    featuresSub: "에이전트가 \"다 했어\"라고 선언하는 것과, 검증 가능한 사실은 다릅니다. Symphony는 후자만 믿습니다.",
-    f1T: "하나의 액션 워크플로", f1D: "/sym continue 하나가 다음 유효 단계를 진행합니다. 플랜 브리프 주입, fresh 리뷰어 실행, 필수 체크 수행, 승인 요청 중 현재 상태에 맞는 것을 자동 선택.",
-    f2T: "독립 리뷰", f2D: "리뷰는 구현자 트랜스크립트를 절대 받지 않는 fresh 세션에서 실행됩니다. 읽기 전용 도구, 경계된 매니페스트, 턴 상한. 구현자 세션의 자체 리뷰는 엔진 차원에서 거부됩니다.",
-    f3T: "우회 불가능한 게이트", f3D: "실패·타임아웃·stale한 필수 체크는 Ready와 Done을 봉쇄합니다. 검증은 결정론적 증거 위에서만 판정되고, 모델 리포트가 이를 뒤집을 수 없습니다.",
-    f4T: "증거 무결성", f4D: "체크 아티팩트는 sha256로 원장에 바인딩됩니다. 변조되면 broken으로 강등되어 게이트가 막힙니다. 작업 파일과 원장 불일치는 적발되어 보고됩니다.",
-    f5T: "크래시 세이프 복구", f5D: "어느 시점에서 죽어도 재시작은 진행 중 시도를 Interrupted로 표시합니다. 자동 재개 없음, 중복 실행 없음, 거짓 완료 없음. Resume과 Retry도 구분됩니다.",
-    f6T: "동기화된 로컬 웹 UI", f6D: "/sym web으로 loopback 전용 컨트롤 플레인을 띄웁니다. SSE 실시간 동기화, 설정 draft→diff→apply, 토큰 인증. 터미널과 브라우저가 같은 명령 서비스를 공유합니다.",
-    flowH: "워크플로", flowSub: "수동 통합을 제외한 모든 단계가 증거와 계약으로 게이트됩니다.",
-    r1T: "리뷰 provenance는 협상 불가", r1D: "구현자 세션이 제출한 리뷰는 절대 검증 게이트를 통과할 수 없습니다. fresh 리뷰어 세션 또는 기록된 인간 승인만 유효합니다.",
-    r2T: "changes_requested는 진짜로 막힌다", r2D: "리뷰어가 수정 요청을 내면 엔진이 review→verify 전환을 거부합니다. TUI가 아니라 엔진이 강제합니다.",
-    r3T: "커스텀 워크플로도 불변식을 지킨다", r3D: "v2 그래프로 스테이지를 자유롭게 추가해도, Done으로 가는 모든 경로에서 결정론적 검증과 완료 증거가 강제됩니다.",
-    r4T: "위임 역할은 읽기 전용", r4D: "scout·architect·security reviewer 등 위임 세션은 쓰기 도구를 가질 수 없습니다. 결과는 해시로 검증된 핸드오프로만 돌아옵니다.",
-    installH: "설치 & 사용", installSub: "저장소에 확장을 설치하고, 그 안에서 /sym으로 시작합니다. 프로젝트 스크립트는 실행되지 않습니다.",
-    installNote: "Pi 확장 · Node 22+ · git 2.30+",
-    stat: "v1.0.1 · 321 tests · 36 suites · tsc clean · 실-pi smoke 5/5 · 4차례 적대적 리뷰 · 모든 확정 findings 수정 + 회귀 테스트",
-    footNote: "샌드박스가 아닙니다: 사용자 권한으로 실행되며, 보호는 정책과 확인입니다."
+    navHow:"작동 방식", navWalk:"사용 흐름", navRules:"보장", navInstall:"설치",
+    heroEyebrow:"PI 확장 · EVIDENCE-BASED WORKFLOW",
+    heroA:"에이전트가", heroB:"\"다 했어\"", heroC:"라고 말할 때,", heroD:"증거가 답한다",
+    heroSub:"Symphony는 Pi 안에서 작업을 Plan → Build → Review → Verify → Ready → Done으로 끌고 가는 워크플로 엔진입니다. 각 단계는 검증 가능한 증거로만 통과되고, 그 게이트는 모델이 우회할 수 없습니다.",
+    ctaInstall:"설치",
+    metaTested:"4차례 적대적 리뷰", metaFree:"MIT",
+    howEyebrow:"HOW IT WORKS", howH:"증거 기반 파이프라인",
+    howSub:"각 스테이지는 산출물(report)을 요구하고, 각 화살표는 계약(contract)을 검사합니다. 계약이 충족되지 않으면 엔진이 전환을 거부합니다 — 모델의 선언이 아니라 증거가 상태를 바꿉니다.",
+    gPlan:"plan_report<br />+ 승인(리스크 시)", gBuild:"impl_report", gReview:"fresh 세션<br />approved", gVerify:"checks passed<br />@ HEAD", gReady:"통합 대기", gManualT:"MERGE", gManual:"직접 머지<br />(자동화 없음)", gDone:"post-checks<br />@ 통합 리비전",
+    archCap:"<b>단일 변경 경로:</b> 터미널과 브라우저 어디서 조작해도 모든 변경은 SymphonyCore 하나를 통과합니다. 상태는 마크다운 작업 파일 + 증거 아티팩트 + append-only 이벤트 원장에 기록되고, 어느 시점에서 죽어도 재시작이 그대로 복원합니다. 리뷰어는 fresh 세션으로 실행되어 구현자의 대화를 절대 받지 않습니다.",
+    walkEyebrow:"WALKTHROUGH", walkH:"실제 사용 흐름", walkSub:"기억할 명령은 하나뿐입니다. /sym continue는 현재 상태를 보고 다음 유효 단계를 실행합니다.",
+    w1T:"초기화", w1D:"저장소를 읽고(스크립트 실행 없이) 체크 명령을 제안하고 .symphony/를 만듭니다. config.yaml은 커밋되고, evidence와 runtime은 gitignore됩니다.",
+    w1DetailPre:"제안 화면:", w1Detail1:"체크·정책 (커밋됨)", w1Detail2:"작업 = 사람이 읽는 마크다운", w1Detail3:"체크·리뷰·통합 아티팩트", w1Detail4:"이벤트 원장·리스 (자동 복구)",
+    w2T:"작업 생성", w2D:"제목, 종류, 인수기준(acceptance criteria), 리스크를 입력합니다. 리스크를 선언하면 플랜 승인이 필수가 됩니다 — 플랜 도중 새 리스크가 발견되면 그때 승인이 요구됩니다.",
+    w3T:"진행", w3D:"플랜 단계면 브리프를 주입하고, 빌드 단계면 구현 브리프를 주입하고, 리뷰 단계면 fresh 리뷰어를 띄우고, 검증 단계면 필수 체크를 실행합니다. 모델은 sym_plan_submit / sym_build_report로 구조화된 리포트만 제출합니다 — 전환은 엔진이 결정합니다.",
+    w4T:"독립 리뷰", w4D:"리뷰어는 새 Pi 세션에서 시작해 작업 계약·플랜·diff·리포트만 받습니다(구현자 트랜스크립트 제외). 도구는 읽기 전용, 턴 상한 존재. changes_requested를 내면 엔진이 다음 단계를 거부합니다 — TUI가 아니라 엔진이요.",
+    w5T:"검증과 통합", w5D:"필수 체크가 현재 HEAD에서 통과해야 READY가 됩니다. 직접 머지한 뒤 통합 리비전을 기록하면, Symphony가 그 커밋이 타깃 브랜치에 있는지 확인하고 통합 리비전 기준으로 체크를 재실행합니다. 모두 통과해야 DONE입니다.",
+    rulesEyebrow:"GUARANTEES", rulesH:"엔진이 강제하는 것들", rulesSub:"이 규칙들은 문서가 아니라 코드입니다. 각 항목은 회귀 테스트로 고정되어 있습니다.",
+    r1T:"자기 리뷰 통과 불가", r1D:"구현자 세션이 제출한 리뷰는 provenance에서 거부됩니다. fresh 리뷰어 세션 또는 기록된 인간 승인만 유효하고, changes_requested는 엔진이 실제로 막습니다.",
+    r2T:"실패한 체크 = 완료 봉쇄", r2D:"실패·타임아웃·stale(다른 리비전에서 실행)·broken(아티팩트 변조) 체크는 READY와 DONE을 막습니다. 모델 리포트가 이를 뒤집을 수 없습니다.",
+    r3T:"증거 위조 감지", r3D:"체크 아티팩트는 sha256로 이벤트 원장에 바인딩됩니다. 누군가 파일을 고쳐도 재시작 시 broken으로 강등되어 게이트가 막힙니다. 작업 파일과 원장의 불일치도 적발됩니다.",
+    r4T:"커스텀 워크플로도 안전", r4D:"v2 그래프로 스테이지를 마음대로 추가해도, DONE으로 가는 모든 앞선 경로는 결정론적 검증 없이는 거부됩니다. 시큐리티 리뷰 스테이지 추가는 되도, 검증 우회는 안 됩니다.",
+    f1T:"위임 = 읽기 전용", f1D:"scout·architect·security reviewer 등 위임 역할은 쓰기 도구를 받지 못하고, 결과는 해시로 검증된 핸드오프로만 돌아옵니다.",
+    f2T:"크래시 세이프", f2D:"어느 시점에서 죽어도 재시작은 진행 중 시도를 Interrupted로 표시합니다. 자동 재개·중복 실행·거짓 완료가 없습니다.",
+    f3T:"사람 메모 보존", f3D:"작업 파일의 관리 마커 밖에 쓴 인간 메모는 기계 쓰기가 반복돼도 바이트 단위로 보존됩니다.",
+    instEyebrow:"INSTALL", instH:"한 줄 설치", instSub:"Pi 0.84+ · Node 22+ · git 2.30+. 설치 후 어떤 저장소에서든 /sym으로 시작합니다.",
+    inst1:"체크 제안 확인 → .symphony/ 생성", inst2:"인수기준 + 리스크로 작업 생성", inst3:"다음 단계로 (기억할 명령은 이것 하나)", inst4:"브라우저 컨트롤 플레인 (loopback)",
+    copy:"클릭하여 복사",
+    statLine:"v1.0.1 · <b>321</b> tests · <b>36</b> suites · tsc clean · real-pi smoke <b>5/5</b> · <b>4</b>차례 적대적 리뷰 · 모든 확정 findings 수정 + 회귀 테스트",
+    footNote:"샌드박스가 아닙니다: 사용자 권한으로 실행되며 보호는 정책과 확인입니다. 자동 프로덕션 배포 없음."
   },
   en: {
-    navFeatures: "Features", navWorkflow: "Workflow", navInstall: "Install",
-    badge: "v1.0.1 · 10 versions · 4 adversarial review cycles",
-    heroA: "When the agent says", heroB: "\"it's done\",", heroC: "the evidence", heroD: "decides",
-    tagline: "Evidence-based development workflow for the Pi coding agent. Plan, build, independent review, deterministic verification, delivery — every step recorded with verifiable evidence, and the model cannot bypass the gates.",
-    ctaInstall: "Install", ctaSource: "View source",
-    featuresH: "Evidence owns status",
-    featuresSub: "An agent declaring \"done\" is not the same as a verifiable fact. Symphony trusts only the latter.",
-    f1T: "One-action workflow", f1D: "/sym continue advances the next valid step — plan brief injection, fresh reviewer launch, required checks, or approval requests, chosen from current state.",
-    f2T: "Independent review", f2D: "Reviews run in a fresh session that never receives the implementer transcript. Read-only tools, bounded manifest, turn caps. Implementer-session reviews are rejected at the engine level.",
-    f3T: "Unbypassable gates", f3D: "Failed, timed-out, or stale required checks block Ready and Done. Verification is decided on deterministic evidence only — no model report can flip it.",
-    f4T: "Evidence integrity", f4D: "Check artifacts are sha256-bound to the ledger. Tampering downgrades them to broken and the gate refuses. Task-file vs ledger divergence is detected and reported.",
-    f5T: "Crash-safe recovery", f5D: "Die anywhere: restart marks in-flight attempts Interrupted. No auto-resume, no duplicates, no false completions. Resume and Retry are distinct.",
-    f6T: "Synced local web UI", f6D: "/sym web starts a loopback-only control plane: SSE live sync, config draft→diff→apply, token auth. Terminal and browser share one command service.",
-    flowH: "The workflow", flowSub: "Every stage except manual integration is gated by evidence and contracts.",
-    r1T: "Review provenance is non-negotiable", r1D: "A review submitted by the implementer session can never pass the verification gate. Only fresh reviewer sessions or recorded human acceptance count.",
-    r2T: "changes_requested actually blocks", r2D: "When the reviewer requests changes, the engine refuses review→verify. Enforced by the engine, not the TUI.",
-    r3T: "Custom workflows keep the invariants", r3D: "Add stages freely with the v2 graph — every path to Done still enforces deterministic verification and completion evidence.",
-    r4T: "Delegated roles are read-only", r4D: "Scouts, architects, security reviewers never get mutation tools. Results return through hash-verified handoffs.",
-    installH: "Install & use", installSub: "Install the extension once, then drive everything with /sym inside your repository. No project scripts are executed.",
-    installNote: "Pi extension · Node 22+ · git 2.30+",
-    stat: "v1.0.1 · 321 tests · 36 suites · tsc clean · real-pi smoke 5/5 · 4 adversarial review cycles · every confirmed finding fixed with regression tests",
-    footNote: "not a sandbox: it runs with your permissions; protection is policy and confirmation."
+    navHow:"How it works", navWalk:"Walkthrough", navRules:"Guarantees", navInstall:"Install",
+    heroEyebrow:"PI EXTENSION · EVIDENCE-BASED WORKFLOW",
+    heroA:"When the agent says", heroB:"\"it's done\"", heroC:"— the evidence", heroD:"answers",
+    heroSub:"Symphony is a workflow engine inside Pi that drives tasks through Plan → Build → Review → Verify → Ready → Done. Every stage passes only on verifiable evidence, and the model cannot bypass the gates.",
+    ctaInstall:"Install",
+    metaTested:"4 adversarial review cycles", metaFree:"MIT",
+    howEyebrow:"HOW IT WORKS", howH:"An evidence-based pipeline",
+    howSub:"Each stage requires an artifact (a report); each arrow checks a contract. If the contract isn't met, the engine refuses the transition — evidence changes state, not the model's claims.",
+    gPlan:"plan_report<br />+ approval (if risks)", gBuild:"impl_report", gReview:"fresh session<br />approved", gVerify:"checks passed<br />@ HEAD", gReady:"awaits integration", gManualT:"MERGE", gManual:"you merge<br />(no automation)", gDone:"post-checks<br />@ integrated rev",
+    archCap:"<b>One mutation path:</b> from the terminal or the browser, every change goes through SymphonyCore. State lives in markdown task files + evidence artifacts + an append-only event ledger, and any crash restarts into the exact same state. The reviewer runs in a fresh session and never receives the implementer's transcript.",
+    walkEyebrow:"WALKTHROUGH", walkH:"What using it looks like", walkSub:"There is one command to remember. /sym continue inspects the current state and executes the next valid step.",
+    w1T:"Initialize", w1D:"Reads your repository (without running any scripts), proposes check commands, and scaffolds .symphony/. config.yaml is committed; evidence and runtime are gitignored.",
+    w1DetailPre:"Proposal screen:", w1Detail1:"checks & policy (committed)", w1Detail2:"tasks = human-readable markdown", w1Detail3:"check/review/integration artifacts", w1Detail4:"event ledger & leases (auto-recovered)",
+    w2T:"Create a task", w2D:"Enter a title, kind, acceptance criteria, and risks. Declaring risks makes plan approval mandatory — and risks discovered mid-plan trigger approval at that point.",
+    w3T:"Advance", w3D:"In plan it injects the brief; in build the implementation brief; in review it launches a fresh reviewer; in verify it runs required checks. The model only submits structured reports via sym_plan_submit / sym_build_report — the engine decides transitions.",
+    w4T:"Independent review", w4D:"The reviewer starts in a new Pi session and receives only the task contract, plan, diff, and reports (never the implementer transcript). Read-only tools, turn caps. If it returns changes_requested, the engine blocks the next stage — the engine, not the TUI.",
+    w5T:"Verify & integrate", w5D:"Required checks must pass at the current HEAD to reach READY. After you merge manually and record the integrated revision, Symphony verifies that commit is on the target branch and re-runs checks against it. All green — then DONE.",
+    rulesEyebrow:"GUARANTEES", rulesH:"What the engine enforces", rulesSub:"These rules are code, not documentation. Each one is pinned by a regression test.",
+    r1T:"No self-review", r1D:"Reviews submitted by the implementer session are rejected by provenance. Only fresh reviewer sessions or recorded human acceptance count — and changes_requested genuinely blocks.",
+    r2T:"Failed checks block completion", r2D:"Failed, timed-out, stale (run at a different revision), or broken (tampered artifact) checks block READY and DONE. No model report can flip that.",
+    r3T:"Forgery detection", r3D:"Check artifacts are sha256-bound to the event ledger. Tamper with a file and the next restart downgrades it to broken, closing the gate. Task-file vs ledger divergence is caught too.",
+    r4T:"Custom workflows stay safe", r4D:"Add stages freely with the v2 graph — every forward path to DONE still requires deterministic verification. A security-review stage: yes. Skipping verification: no.",
+    f1T:"Delegation is read-only", f1D:"Scouts, architects, and security reviewers never receive mutation tools; results return through hash-verified handoffs.",
+    f2T:"Crash-safe", f2D:"Die anywhere: restart marks in-flight attempts Interrupted. No auto-resume, no duplicates, no false completions.",
+    f3T:"Human notes survive", f3D:"Notes you write outside the managed markers in task files survive every machine write, byte for byte.",
+    instEyebrow:"INSTALL", instH:"One-line install", instSub:"Pi 0.84+ · Node 22+ · git 2.30+. After installing, start with /sym in any repository.",
+    inst1:"review proposed checks → scaffold .symphony/", inst2:"create a task with criteria + risks", inst3:"advance (the one command to remember)", inst4:"browser control plane (loopback)",
+    copy:"click to copy",
+    statLine:"v1.0.1 · <b>321</b> tests · <b>36</b> suites · tsc clean · real-pi smoke <b>5/5</b> · <b>4</b> adversarial review cycles · every confirmed finding fixed with regression tests",
+    footNote:"not a sandbox: it runs with your permissions; protection is policy and confirmation. No automated production deployment."
   }
 };
-const btnKo = document.getElementById("btnKo"), btnEn = document.getElementById("btnEn");
+
+const $ = (s) => document.querySelector(s);
+const btnKo = $("#btnKo"), btnEn = $("#btnEn");
 function setLang(lang) {
   const dict = I18N[lang]; if (!dict) return;
   document.querySelectorAll("[data-i18n]").forEach((el) => {
     const key = el.getAttribute("data-i18n");
-    if (dict[key] !== undefined) el.textContent = dict[key];
+    if (dict[key] !== undefined) el.innerHTML = dict[key];
   });
   document.documentElement.lang = lang;
   btnKo.classList.toggle("on", lang === "ko");
@@ -286,9 +454,40 @@ function setLang(lang) {
 }
 btnKo.addEventListener("click", () => setLang("ko"));
 btnEn.addEventListener("click", () => setLang("en"));
-let saved = "ko";
-try { saved = localStorage.getItem("sym-lang") || "ko"; } catch {}
-setLang(saved);
+
+/* theme toggle */
+const themeBtn = $("#themeBtn");
+function setTheme(t) {
+  document.documentElement.classList.toggle("dark", t === "dark");
+  try { localStorage.setItem("sym-theme", t); } catch {}
+}
+themeBtn.addEventListener("click", () => setTheme(document.documentElement.classList.contains("dark") ? "light" : "dark"));
+
+/* copy install command */
+const cmd = $("#copyCmd");
+function copyCmd() {
+  const text = "pi install github:cskwork/pi-symphony";
+  navigator.clipboard?.writeText(text).catch(() => {});
+  const hint = cmd.querySelector(".hint"); if (hint) { const old = hint.textContent; hint.textContent = "✓"; setTimeout(() => (hint.textContent = old), 1200); }
+}
+cmd.addEventListener("click", copyCmd);
+cmd.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); copyCmd(); } });
+
+/* reveal on scroll */
+const io = new IntersectionObserver((entries) => {
+  entries.forEach((en) => { if (en.isIntersecting) { en.target.classList.add("in"); io.unobserve(en.target); } });
+}, { threshold: 0.12 });
+document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+
+/* boot */
+let savedLang = "ko", savedTheme = null;
+try {
+  savedLang = localStorage.getItem("sym-lang") || "ko";
+  savedTheme = localStorage.getItem("sym-theme") ||
+    (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+} catch {}
+setTheme(savedTheme);
+setLang(savedLang);
 </script>
 </body>
 </html>
